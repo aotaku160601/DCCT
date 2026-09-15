@@ -18,6 +18,7 @@ import logging
 import sys
 
 from .data import db as db_module
+from .data import ingest as ingest_module
 from .experiment.config import Config
 from .experiment.paths import resolve
 
@@ -32,6 +33,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ingest = sub.add_parser("ingest", help="外部SSD上のGenImageを走査しDBへ登録する")
     p_ingest.add_argument("--config", default="configs/base.yaml")
+    p_ingest.add_argument(
+        "--generator", action="append", dest="generators",
+        help="この生成器のみ走査する（複数指定可）。失敗した生成器だけの再実行に使う",
+    )
+    p_ingest.add_argument("--limit", type=int, help="1生成器あたりの走査枚数上限（スモークテスト用）")
+    p_ingest.add_argument("--dry-run", action="store_true", help="DBへ書き込まずに走査結果だけ表示する")
+    p_ingest.add_argument("--no-progress", action="store_true", help="進捗バーを表示しない")
 
     p_s1 = sub.add_parser("train-stage1", help="条件付き分布モデル pθ / qφ を学習する")
     p_s1.add_argument("--target", choices=["photo", "ai"], required=True)
@@ -68,12 +76,37 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest(args: argparse.Namespace) -> int:
+    config = Config.load(args.config)
+
+    results = ingest_module.ingest(
+        config,
+        only_generators=args.generators,
+        limit=args.limit,
+        dry_run=args.dry_run,
+        progress=not args.no_progress,
+    )
+
+    print()
+    print(f"{'生成器':<14}{'走査':>10}{'新規登録':>10}{'登録済み':>10}{'破損':>8}{'64px未満':>10}  備考")
+    for st in results:
+        note = st.skipped_reason or ", ".join(f"{k}={v}" for k, v in sorted(st.by_split.items()))
+        print(
+            f"{st.generator:<14}{st.scanned:>10,}{st.inserted:>10,}"
+            f"{max(st.already_registered, 0):>10,}{st.invalid:>8,}{st.too_small:>10,}  {note}"
+        )
+    if args.dry_run:
+        print("\n（--dry-run のためDBへは書き込んでいません）")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv)
 
     handlers = {
         "init-db": cmd_init_db,
+        "ingest": cmd_ingest,
     }
     handler = handlers.get(args.command)
     if handler is None:

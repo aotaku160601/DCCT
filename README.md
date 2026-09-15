@@ -95,6 +95,72 @@ python -m src.cli init-db --config configs/base.yaml --force  # バックアッ�
 python -m pytest
 ```
 
+## データ取り込み（ingest）
+
+```bash
+python -m src.cli ingest --config configs/base.yaml
+python -m src.cli ingest --config configs/base.yaml --generator SDv1.4   # 生成器を限定
+python -m src.cli ingest --config configs/base.yaml --limit 100 --dry-run  # スモークテスト
+```
+
+走査対象は `configs/base.yaml` の `dataset.sources`（`dataset_root` からの相対パス）で定義する。
+ディレクトリでもZIPでも同じインタフェースで扱う。
+
+### ZIPは展開しない
+
+SDv1.4 のZIPだけで 96.46 GB あるため、展開せず `zipfile` で個々の画像を遅延読み出しする。
+`images.filepath` には次の形式で記録する（DBスキーマの変更は不要）。
+
+```
+ディレクトリ: /Volumes/Extreme Pro/BigGAN/train/ai/xxx.png
+ZIP内:        /Volumes/Extreme Pro/genimage-...zip!train/ai/xxx.png
+```
+
+`src.data.sources.open_image_bytes()` がどちらの形式も透過的に読む。学習時は
+DataLoaderのワーカーごとにZIPを開き直すこと（`ZipFile` はプロセス・スレッド間で共有しない）。
+
+### ディレクトリ構成の判定
+
+相対パスの末尾から「親ディレクトリ＝クラス（`ai` / `nature`）」「その親＝split（`train` / `val`）」
+として判定するため、`imagenet_ai_0419_biggan/train/ai/...` のように上位フォルダが挟まっても
+同じルールで取り込める。表記ゆれは `dataset.directory_aliases` で吸収する。
+
+### split の割当
+
+GenImage は `train/` と `val/` しか持たないため、以下のように割り当てる
+（`dataset.split` で変更可能）。
+
+| GenImage側 | DBの split | 用途 |
+|---|---|---|
+| `val/` | `test` | Table 1 の cross-generator 評価 |
+| `train/` の95% | `train` | Stage I / Stage II の学習 |
+| `train/` の5% | `val` | 閾値τのチューニング、チェックポイント選択 |
+
+train/val の振り分けは `blake2b(seed + filepath)` で決まるため、再実行しても同じ画像が
+同じ split に入る（NFR-1 再現性）。評価用データに触れずにτを決められる。
+
+### 実写画像（nature/）の生成器紐づけ
+
+`dataset.real_generator_naming: per_source`（既定）では、生成器ごとに
+`ImageNet(real)@SDv1.4` のような実写用 generator を作る。cross-generator 評価で
+「その生成器に対応する実写セット」を generator_id だけで一意に引けるようにするためで、
+`shared` にすると全生成器の `nature/` を単一の `ImageNet(real)` にまとめる。
+
+### 取得するメタデータ
+
+パス・ラベル・split・ファイルサイズに加え、画像ヘッダ（先頭64KB）のみを復号して
+width/height を取得する。これにより ingest 時点で
+
+- 読み込めない画像 → `status='invalid'`
+- 64×64 未満の画像 → `is_croppable=0`
+
+を判定でき、`MetadataRepository.list_images()` が学習・評価対象から自動的に除外する
+（03_詳細設計書 6節）。`checksum` は全データを読み直すことになるため ingest では算出しない。
+
+生成器（ソース）単位でトランザクションを分けているので、途中で失敗しても成功済みの
+生成器はDBに残り、`--generator` で失敗分だけ再実行できる。`filepath` が UNIQUE のため
+再実行しても重複登録は起きない。
+
 ## 設計上の決定事項（Open Issues への回答）
 
 ### OI-1: Midjourneyデータ未取得
@@ -130,7 +196,7 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 
 | ID | 状態 |
 |---|---|
-| OI-3 外部SSDマウントパス・ZIP展開先 | `configs/base.yaml` の `paths.dataset_root` / `paths.extract_root` に外出し済み。実パスは ingest 実行時に確定 |
+| OI-3 外部SSDマウントパス・ZIP展開先 | `paths.dataset_root` に外出し済み（既定 `/Volumes/Extreme Pro`）。ZIPは展開せず直読みするため展開先は不要（`paths.extract_root` は未使用） |
 | OI-4 / OI-5 GPU・チップ種別・SSDフォーマット | デバイス抽象化で吸収。学習時間はスモークテストで実測する |
 | 03-7.2 SRM 30種カーネル係数 | SRM (Fridrich & Kodovsky, 2012) の公開係数を一次参照として実装予定 |
 | 03-7.3 判定閾値 τ | 既定0.5。val上でYouden指数最大化によりチューニング |
@@ -140,5 +206,5 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 
 - [x] Step 1: プロジェクト雛形・仮想環境・requirements.txt
 - [x] Step 2: メタデータDB初期化（04_DB設計書 4節のDDL）
-- [ ] Step 3: データ取り込みバッチ（`ingest`）
+- [x] Step 3: データ取り込みバッチ（`ingest`）
 - [ ] Step 4: CFAマスク → ハイパスフィルタ → 条件付きモデル(pθ/qφ) → 分類器gψ

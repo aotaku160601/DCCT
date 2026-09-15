@@ -10,7 +10,8 @@ paths:
   # 外部SSD「Extreme Pro」のマウントポイント配下。パスに空白を含むため必ずクォートすること。
   # 【OI-3】実パスは ingest 実行前に確定させる。
   dataset_root: "/Volumes/Extreme Pro/GenImage"
-  # ZIP展開先（展開済みフォルダを直接指す場合は dataset_root と同一で良い）
+  # ZIP展開先。現在はZIPを展開せず直読みする方針のため未使用（README「ZIPは展開しない」参照）。
+  # 将来展開方式に切り替える場合の置き場所として残している。
   extract_root: "/Volumes/Extreme Pro/GenImage_extracted"
   db_path: "db/dcct_metadata.sqlite3"
   checkpoint_root: "checkpoints"
@@ -44,6 +45,41 @@ dataset:
     - VQDM
     - BigGAN
 
+
+  # ---- ingest（データ取り込み）設定 ----
+  # dataset_root からの相対パス。ZIPでもディレクトリでも同じインタフェースで走査する。
+  # type: auto（拡張子から判定） | zip | dir
+  sources:
+    - { name: SDv1.4, path: "genimage-stable-diffusion-v1-4.zip", category: diffusion, type: auto }
+    - { name: SDv1.5, path: "stable_diffusion_v_1_5",             category: diffusion, type: auto }
+    - { name: ADM,    path: "genimage-adm.zip",                   category: diffusion, type: auto }
+    - { name: Wukong, path: "genimage-wukong.zip",                category: diffusion, type: auto }
+    - { name: GLIDE,  path: "imagenet_glide",                     category: diffusion, type: auto }
+    - { name: VQDM,   path: "VQDM",                               category: diffusion, type: auto }
+    - { name: BigGAN, path: "BigGAN",                             category: gan,       type: auto }
+    # 【OI-1】未取得。path は判明後に設定する（excluded_generators に入っている間は走査しない）
+    - { name: Midjourney, path: "",                               category: diffusion, type: auto }
+
+  # nature/（実写ImageNet画像）をどの generator に紐づけるか
+  #   per_source: 生成器ごとに 'ImageNet(real)@<生成器名>' を作る（既定）
+  #               → cross-generator評価で「その生成器に対応する実写セット」を一意に引ける
+  #   shared:     全生成器の nature/ をまとめて単一の 'ImageNet(real)' に紐づける
+  real_generator_naming: per_source
+
+  # GenImageは train/ と val/ しか持たないため、DBの split へ以下のように割り当てる
+  split:
+    # GenImage の val/ を test split として登録する（Table 1評価に使う）
+    source_val_as: test
+    # train/ から切り出して val split に回す比率（閾値τのチューニング・チェックポイント選択用）
+    # 割当は seed とファイルパスのハッシュで決まるため、再実行しても同じ結果になる
+    val_ratio_from_train: 0.05
+
+  # ディレクトリ名の別名（GenImageの配布物により表記ゆれがあるため）
+  directory_aliases:
+    ai: [ai, fake, sdv4, imagenet_ai]
+    real: [nature, real, imagenet_real]
+    train: [train]
+    val: [val, validation]
 preprocess:
   # 03_詳細設計書 1.1 パラメータ一覧
   patch_size: 64            # s
