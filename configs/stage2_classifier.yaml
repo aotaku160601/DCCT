@@ -1,0 +1,26 @@
+# Stage II: 二値分類器 gψ の学習
+extends: base.yaml
+
+experiment:
+  name: stage2_classifier_sdv14
+  stage: stage2_classifier
+
+data:
+  # real / ai 両方を使う
+  split: train
+
+stage2:
+  # Frozen な pθ / qφ のチェックポイント（Stage I完了後に実パスを設定）
+  photo_model_checkpoint: null
+  ai_model_checkpoint: null
+  # Ablation-A: 使用する条件付きモデルの切替
+  use_photo_model: true
+  use_ai_model: true
+  # Ablation-D: false にすると pθ/qφ にも勾配を通す（full fine-tuning）
+  freeze_conditional_models: true
+
+train:
+  num_epochs: 20
+  checkpoint_dir: checkpoints/stage2_classifier
+  save_every_epoch: 1
+  resume_from: null

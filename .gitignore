@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# メタデータDB本体とバックアップはコミットしない（スキーマはmigrations/で管理）
+db/*.sqlite3
+db/backups/
+
+# 学習成果物
+checkpoints/**/*.pt
+logs/*
+reports/*
+!logs/.gitkeep
+!reports/.gitkeep
+
+.DS_Store

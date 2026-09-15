@@ -1,0 +1,12 @@
+# Ablation-D（Table 4d相当）: 分類器学習時に pθ/qφ を Frozen にするか full fine-tuning するか
+extends: ../stage2_classifier.yaml
+
+experiment:
+  name: ablation_d_finetune
+  stage: ablation
+
+ablation:
+  group: D
+  variants:
+    - { label: "frozen",    freeze_conditional_models: true  }   # 既定
+    - { label: "finetuned", freeze_conditional_models: false }

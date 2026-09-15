@@ -1,0 +1,17 @@
+# Stage I-B: 条件付き分布モデル qφ（AI生成画像で学習）
+extends: base.yaml
+
+experiment:
+  name: stage1_ai_sdv14
+  stage: stage1_ai
+
+data:
+  # qφ は AI生成画像（学習生成器 = SDv1.4）のみで学習する
+  label: ai
+  split: train
+
+train:
+  num_epochs: 20
+  checkpoint_dir: checkpoints/stage1_ai
+  save_every_epoch: 1
+  resume_from: null

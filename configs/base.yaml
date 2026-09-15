@@ -1,0 +1,84 @@
+# 共通設定（02_基本設計書 5節 / 8節、01_要件定義書 NFR-5 対応）
+# 環境依存の値はすべてここに外出しし、コードにハードコードしない。
+
+project:
+  name: dcct-reproduction
+  # 全実験で共通の乱数シード（データ分割・モデル初期化・パッチサンプリングに適用）
+  seed: 42
+
+paths:
+  # 外部SSD「Extreme Pro」のマウントポイント配下。パスに空白を含むため必ずクォートすること。
+  # 【OI-3】実パスは ingest 実行前に確定させる。
+  dataset_root: "/Volumes/Extreme Pro/GenImage"
+  # ZIP展開先（展開済みフォルダを直接指す場合は dataset_root と同一で良い）
+  extract_root: "/Volumes/Extreme Pro/GenImage_extracted"
+  db_path: "db/dcct_metadata.sqlite3"
+  checkpoint_root: "checkpoints"
+  log_root: "logs"
+  report_root: "reports"
+
+device:
+  # auto = cuda -> mps -> cpu の順に自動選択（03_詳細設計書 7.5、02_基本設計書 9節）
+  # 明示指定する場合は cuda / mps / cpu を直接書く。torch.cuda.* には依存しない実装とする。
+  type: auto
+  # MPS未対応演算をCPUへ自動フォールバックさせる（macOS実行時のみ意味を持つ）
+  enable_mps_fallback: true
+
+dataset:
+  name: GenImage
+  # 【OI-1】Midjourneyは未取得のため、当面すべての学習・評価から除外する。
+  # データ取得後はこのリストを空にするだけで8生成器のTable1再現に復帰できる。
+  excluded_generators:
+    - Midjourney
+  # 学習に用いる生成器（論文プロトコル：SDv1.4のみで学習）
+  train_generators:
+    - SDv1.4
+  # cross-generator評価対象（excluded_generators に含まれるものは自動でスキップ）
+  eval_generators:
+    - Midjourney
+    - SDv1.4
+    - SDv1.5
+    - ADM
+    - GLIDE
+    - Wukong
+    - VQDM
+    - BigGAN
+
+preprocess:
+  # 03_詳細設計書 1.1 パラメータ一覧
+  patch_size: 64            # s
+  num_highpass_filters: 30  # M
+  truncation_t: 7           # t
+  use_cfa_mask: true        # Ablation-B で false に切替（ランダムRGB選択マスクになる）
+  use_high_pass: true       # Ablation-B で false に切替（素通し）
+
+augmentation:
+  # FR-10: 学習時のベナイン摂動
+  jpeg:
+    enabled: true
+    probability: 0.05
+    quality_min: 70
+    quality_max: 100
+
+model:
+  conditional_unet:
+    num_mixtures: 10        # K
+    base_channels: 64
+  classifier:
+    resnet_blocks: 4
+    transformer_layers: 2
+    # 【OI-2 決定事項】gψへの入力特徴は案A（U-Net最終出力の混合分布パラメータ）を採用。
+    # チャンネル数は 03_詳細設計書 3.3 の定義（w,μ,s 各 [K,2,H,W]）に従い
+    # 3 * K * 2 = 60ch / モデル、pθ・qφ連結で 120ch とする。
+    # （1.3節の「3K=30ch」表記はμ,sの2ch分を数え落としたものとして扱う。README参照）
+    feature_source: mixture_params   # mixture_params | bottleneck（案B）
+
+train:
+  optimizer: adam
+  learning_rate: 1.0e-4
+  batch_size: 16
+  num_workers: 4
+
+inference:
+  num_patches: 16           # P
+  threshold: 0.5            # τ の初期値。val上でYouden指数最大化によりチューニングする

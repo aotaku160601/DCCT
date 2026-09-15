@@ -1,0 +1,14 @@
+# Ablation-A（Table 4a相当）: 条件付きモデル構成 pθのみ / qφのみ / 両方
+extends: ../stage2_classifier.yaml
+
+experiment:
+  name: ablation_a_dual_model
+  stage: ablation
+
+ablation:
+  group: A
+  # variants の各要素を1実験として順に実行する
+  variants:
+    - { label: "photo_only", use_photo_model: true,  use_ai_model: false }
+    - { label: "ai_only",    use_photo_model: false, use_ai_model: true  }
+    - { label: "both",       use_photo_model: true,  use_ai_model: true  }   # 既定

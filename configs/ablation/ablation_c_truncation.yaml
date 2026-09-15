@@ -1,0 +1,15 @@
+# Ablation-C（Table 4c相当）: truncation閾値 t ∈ {3, 7, 15}
+# ※ t を変えると残差分布が変わるため Stage I-A/I-B から再学習が必要
+extends: ../stage2_classifier.yaml
+
+experiment:
+  name: ablation_c_truncation
+  stage: ablation
+
+ablation:
+  group: C
+  retrain_stage1: true
+  variants:
+    - { label: "t3",  truncation_t: 3  }
+    - { label: "t7",  truncation_t: 7  }   # 既定
+    - { label: "t15", truncation_t: 15 }

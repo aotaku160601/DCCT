@@ -1,0 +1,14 @@
+# Ablation-B（Table 4b相当）: ハイパスフィルタ有無 × CFAマスク有無
+extends: ../stage2_classifier.yaml
+
+experiment:
+  name: ablation_b_structure
+  stage: ablation
+
+ablation:
+  group: B
+  variants:
+    - { label: "no_highpass",  use_high_pass: false, use_cfa_mask: true  }
+    - { label: "no_cfa",       use_high_pass: true,  use_cfa_mask: false }  # ランダムRGB選択マスク
+    - { label: "neither",      use_high_pass: false, use_cfa_mask: false }
+    - { label: "both",         use_high_pass: true,  use_cfa_mask: true  }  # 既定

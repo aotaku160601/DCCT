@@ -1,0 +1,17 @@
+# Stage I-A: 条件付き分布モデル pθ（写真画像で学習）
+extends: base.yaml
+
+experiment:
+  name: stage1_photo_sdv14
+  stage: stage1_photo
+
+data:
+  # pθ は写真（real）のみで学習する
+  label: real
+  split: train
+
+train:
+  num_epochs: 20
+  checkpoint_dir: checkpoints/stage1_photo
+  save_every_epoch: 1
+  resume_from: null
