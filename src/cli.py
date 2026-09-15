@@ -40,6 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--limit", type=int, help="1生成器あたりの走査枚数上限（スモークテスト用）")
     p_ingest.add_argument("--dry-run", action="store_true", help="DBへ書き込まずに走査結果だけ表示する")
     p_ingest.add_argument("--no-progress", action="store_true", help="進捗バーを表示しない")
+    p_ingest.add_argument(
+        "--no-probe", action="store_true",
+        help="画像ヘッダを読まずにパスとサイズだけ登録する（ディレクトリ走査が遅い環境向け。"
+             "width/heightと破損判定は行われない）",
+    )
+    p_ingest.add_argument(
+        "--cleanup", action="store_true",
+        help="登録済みのOS管理ファイル（._xxx 等）の行を削除する（--dry-run と併用可）",
+    )
 
     p_s1 = sub.add_parser("train-stage1", help="条件付き分布モデル pθ / qφ を学習する")
     p_s1.add_argument("--target", choices=["photo", "ai"], required=True)
@@ -93,12 +102,21 @@ def cmd_init_db(args: argparse.Namespace) -> int:
 def cmd_ingest(args: argparse.Namespace) -> int:
     config = Config.load(args.config)
 
+    if args.cleanup:
+        count, samples = ingest_module.cleanup_junk(config, dry_run=args.dry_run)
+        verb = "削除対象" if args.dry_run else "削除しました"
+        print(f"OS管理ファイルの行: {count:,} 件を{verb}")
+        for sample in samples:
+            print(f"  例: {sample}")
+        return 0
+
     results = ingest_module.ingest(
         config,
         only_generators=args.generators,
         limit=args.limit,
         dry_run=args.dry_run,
         progress=not args.no_progress,
+        probe_header=not args.no_probe,
     )
 
     print()

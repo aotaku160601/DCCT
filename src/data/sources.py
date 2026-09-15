@@ -13,6 +13,7 @@ DataLoaderからはワーカーごとに `ZipSource` を開き直すこと（Zip
 
 from __future__ import annotations
 
+import os
 import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -23,6 +24,31 @@ from typing import IO, Iterator
 ZIP_SEPARATOR = "!"
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+
+# OS・ファイルシステムが作る管理ファイル。画像として数えると枚数が水増しされ、
+# 中身は画像ではないので「破損」に分類されてしまう。
+# 特に macOS が exFAT 等へコピーする際に作る AppleDouble（`._<元のファイル名>`）は
+# 元画像と1対1で作られるため、放置すると走査枚数がちょうど倍になる。
+JUNK_DIRECTORIES = {
+    "__MACOSX",
+    "System Volume Information",
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+    ".TemporaryItems",
+    "$RECYCLE.BIN",
+}
+JUNK_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+
+
+def is_junk_entry(relpath: str) -> bool:
+    """OS管理ファイル（AppleDouble等）なら True。"""
+    parts = Path(relpath).parts
+    if any(part in JUNK_DIRECTORIES for part in parts):
+        return True
+
+    name = parts[-1] if parts else relpath
+    return name.startswith("._") or name in JUNK_FILENAMES
 
 
 @dataclass(frozen=True)
@@ -59,16 +85,38 @@ class ImageSource(ABC):
 
 
 class DirectorySource(ImageSource):
-    """展開済みディレクトリを走査するソース。"""
+    """展開済みディレクトリを走査するソース。
+
+    `Path.rglob` ではなく `os.scandir` を使う。ツリー全体をリスト化せずに済み、
+    ディレクトリエントリから種別とサイズを取れるため、外部SSD（特にexFAT）のように
+    1ファイルあたりのシステムコールが高くつく環境で差が出る。
+    """
 
     def iter_entries(self) -> Iterator[ImageEntry]:
-        for path in sorted(self.root.rglob("*")):
-            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
-                yield ImageEntry(
-                    relpath=path.relative_to(self.root).as_posix(),
-                    size_bytes=path.stat().st_size,
-                    filepath=str(path),
-                )
+        yield from self._walk(self.root)
+
+    def _walk(self, directory: Path) -> Iterator[ImageEntry]:
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        except OSError:
+            return
+
+        for entry in entries:
+            if entry.name in JUNK_DIRECTORIES or entry.name.startswith("._"):
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                yield from self._walk(Path(entry.path))
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if Path(entry.name).suffix.lower() not in IMAGE_SUFFIXES or entry.name in JUNK_FILENAMES:
+                continue
+
+            yield ImageEntry(
+                relpath=Path(entry.path).relative_to(self.root).as_posix(),
+                size_bytes=entry.stat().st_size,
+                filepath=entry.path,
+            )
 
     def open(self, entry: ImageEntry) -> IO[bytes]:
         return (self.root / entry.relpath).open("rb")
@@ -95,8 +143,8 @@ class ZipSource(ImageSource):
             name = info.filename
             if Path(name).suffix.lower() not in IMAGE_SUFFIXES:
                 continue
-            # macOSで作られたZIPに混ざるリソースフォークを除外
-            if name.startswith("__MACOSX/") or Path(name).name.startswith("._"):
+            # macOSで作られたZIPに混ざるリソースフォークなどを除外
+            if is_junk_entry(name):
                 continue
             yield ImageEntry(
                 relpath=name,

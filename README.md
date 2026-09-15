@@ -297,6 +297,38 @@ train/val の振り分けは `blake2b(seed + filepath)` で決まるため、再
 「その生成器に対応する実写セット」を generator_id だけで一意に引けるようにするためで、
 `shared` にすると全生成器の `nature/` を単一の `ImageNet(real)` にまとめる。
 
+### OS管理ファイルの除外
+
+macOSがexFAT等の外部ディスクへコピーすると、画像1枚につき `._<元のファイル名>` という
+AppleDoubleファイルが作られる（Finderには表示されない）。これを画像として数えると
+走査枚数がちょうど倍になり、中身は画像ではないため半分が「破損」に分類されてしまう。
+
+ingestはこれらを走査対象から除外する。
+
+- `._` で始まるファイル（AppleDouble）
+- `__MACOSX/`, `System Volume Information/`, `.Spotlight-V100/`, `.Trashes/` など
+- `.DS_Store`, `Thumbs.db`, `desktop.ini`
+
+除外前のバージョンで取り込んでしまった行は、次のコマンドで削除できる。
+
+```bash
+python -m src.cli ingest --config configs/base.yaml --cleanup --dry-run   # 件数だけ確認
+python -m src.cli ingest --config configs/base.yaml --cleanup             # 削除
+```
+
+### ディレクトリ走査が遅いとき
+
+ZIPは中央ディレクトリをまとめて読むので速いが、展開済みフォルダは1ファイルずつ
+開くため、外部SSD（特にexFAT）では大幅に遅くなることがある。`--no-probe` を付けると
+画像ヘッダを読まずにパスとサイズだけで登録する。
+
+```bash
+python -m src.cli ingest --config configs/base.yaml --generator GLIDE --no-probe
+```
+
+この場合 width/height は NULL になり、破損判定と64px未満の判定は行われない
+（読めない画像に当たったときは学習・評価時にスキップされる）。
+
 ### 取得するメタデータ
 
 パス・ラベル・split・ファイルサイズに加え、画像ヘッダ（先頭64KB）のみを復号して

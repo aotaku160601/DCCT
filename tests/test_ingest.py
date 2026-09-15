@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import sqlite3
 import zipfile
+from pathlib import Path
 
 import pytest
 import yaml
@@ -229,3 +230,97 @@ def test_missing_source_path_is_reported_not_fatal(config, tmp_path):
     stats = {s.generator: s for s in ingest(Config.load(path), progress=False)}
     assert "見つかりません" in stats["VQDM"].skipped_reason
     assert stats["SDv1.4"].inserted == 54
+
+
+# ------------------------------------------------- OS管理ファイルの扱い
+
+
+def test_appledouble_files_are_not_scanned(tmp_path):
+    """macOSが外部ディスクに作る `._xxx.png` を画像として数えないこと。
+
+    これを数えると走査枚数がちょうど倍になり、中身が画像ではないため
+    半分が「破損」に分類されてしまう。
+    """
+    root = tmp_path / "Extreme Pro"
+    image_dir = root / "SDv15" / "train" / "ai"
+    image_dir.mkdir(parents=True)
+    for i in range(5):
+        (image_dir / f"img_{i}.png").write_bytes(_png_bytes())
+        # macOSが同じ階層に作るAppleDouble（Finderには見えない）
+        (image_dir / f"._img_{i}.png").write_bytes(b"\x00\x05\x16\x07not an image")
+    (image_dir / ".DS_Store").write_bytes(b"junk")
+    macosx = root / "SDv15" / "__MACOSX" / "train" / "ai"
+    macosx.mkdir(parents=True)
+    (macosx / "img_0.png").write_bytes(b"junk")
+
+    nature_dir = root / "SDv15" / "train" / "nature"
+    nature_dir.mkdir(parents=True)
+    for i in range(5):
+        (nature_dir / f"nat_{i}.png").write_bytes(_png_bytes())
+
+    base = Config.load("configs/base.yaml").as_dict()
+    base["paths"]["dataset_root"] = str(root)
+    base["paths"]["db_path"] = str(tmp_path / "junk.sqlite3")
+    base["dataset"]["sources"] = [
+        {"name": "SDv1.5", "path": "SDv15", "category": "diffusion", "type": "auto"}
+    ]
+    path = tmp_path / "junk.yaml"
+    path.write_text(yaml.safe_dump(base, allow_unicode=True), encoding="utf-8")
+    db_module.init_db(base["paths"]["db_path"])
+
+    stats = {s.generator: s for s in ingest(Config.load(path), progress=False)}
+    assert stats["SDv1.5"].scanned == 10      # 本物の画像だけ
+    assert stats["SDv1.5"].invalid == 0       # AppleDoubleを破損として数えない
+
+    with MetadataRepository(base["paths"]["db_path"]) as repo:
+        paths = [row["filepath"] for row in repo.conn.execute("SELECT filepath FROM images")]
+    assert not any("._" in Path(p).name or "__MACOSX" in p for p in paths)
+
+
+def test_cleanup_removes_already_registered_junk_rows(config):
+    """修正前に登録されてしまったAppleDouble行を削除できること。"""
+    from src.data.ingest import cleanup_junk
+
+    ingest(config, progress=False)
+    db_path = config.get("paths.db_path")
+
+    with MetadataRepository(db_path) as repo:
+        before = repo.conn.execute("SELECT COUNT(*) AS n FROM images").fetchone()["n"]
+        # 旧バージョンが登録していた形の行を再現する
+        repo.register_images(
+            [
+                {
+                    "dataset_id": 1,
+                    "generator_id": 1,
+                    "filepath": f"/Volumes/Extreme Pro/SDv15/train/ai/._img_{i}.png",
+                    "label": "ai",
+                    "split": "train",
+                    "status": "invalid",
+                    "is_croppable": 0,
+                }
+                for i in range(7)
+            ]
+        )
+        assert repo.conn.execute("SELECT COUNT(*) AS n FROM images").fetchone()["n"] == before + 7
+
+    count, samples = cleanup_junk(config, dry_run=True)
+    assert count == 7 and samples
+    with MetadataRepository(db_path) as repo:   # dry-runでは消えない
+        assert repo.conn.execute("SELECT COUNT(*) AS n FROM images").fetchone()["n"] == before + 7
+
+    count, _ = cleanup_junk(config)
+    assert count == 7
+    with MetadataRepository(db_path) as repo:
+        assert repo.conn.execute("SELECT COUNT(*) AS n FROM images").fetchone()["n"] == before
+
+
+def test_no_probe_skips_header_reading(config):
+    """--no-probe ではwidth/heightを取らず、その分だけ速く登録できること。"""
+    stats = {s.generator: s for s in ingest(config, progress=False, probe_header=False)}
+    assert stats["SDv1.4"].scanned == 54
+    assert stats["SDv1.4"].invalid == 0        # 破損判定は行わない
+
+    with MetadataRepository(config.get("paths.db_path")) as repo:
+        row = repo.conn.execute("SELECT width, height, status, is_croppable FROM images LIMIT 1").fetchone()
+    assert row["width"] is None and row["height"] is None
+    assert row["status"] == "valid" and row["is_croppable"] == 1

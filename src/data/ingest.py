@@ -22,7 +22,7 @@ from PIL import Image
 
 from ..experiment.config import Config
 from .repository import MetadataRepository
-from .sources import ImageEntry, ImageSource, open_source
+from .sources import ImageEntry, ImageSource, is_junk_entry, open_source
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +127,7 @@ def _iter_rows(
     source_val_as: str,
     patch_size: int,
     limit: int | None,
+    probe_header: bool,
     stats: IngestStats,
 ) -> Iterator[dict[str, Any]]:
     for entry in source.iter_entries():
@@ -140,12 +141,18 @@ def _iter_rows(
         source_split, label = classified
         stats.scanned += 1
 
-        width, height, status = _probe_image(source, entry)
+        if probe_header:
+            width, height, status = _probe_image(source, entry)
+        else:
+            # 画像を開かずパスとサイズだけで登録する。ディレクトリ走査が遅い環境向け。
+            # width/height が不明なのでクロップ可否は学習時のフォールバックに任せる。
+            width, height, status = None, None, "valid"
+
         if status == "invalid":
             stats.invalid += 1
             is_croppable = 0
         else:
-            is_croppable = int(width >= patch_size and height >= patch_size)
+            is_croppable = 1 if width is None else int(width >= patch_size and height >= patch_size)
             if not is_croppable:
                 stats.too_small += 1
 
@@ -174,6 +181,7 @@ def ingest(
     limit: int | None = None,
     dry_run: bool = False,
     progress: bool = True,
+    probe_header: bool = True,
 ) -> list[IngestStats]:
     """configに従って外部SSD上のGenImageを走査し、DBへ登録する。
 
@@ -253,6 +261,7 @@ def ingest(
                     source_val_as=source_val_as,
                     patch_size=patch_size,
                     limit=limit,
+                    probe_header=probe_header,
                     stats=stats,
                 )
                 if progress:
@@ -286,3 +295,30 @@ def ingest(
         repo.close()
 
     return results
+
+
+def cleanup_junk(config: Config, dry_run: bool = False) -> tuple[int, list[str]]:
+    """既にDBへ登録されてしまったOS管理ファイル（AppleDouble等）の行を削除する。
+
+    AppleDouble（`._<元のファイル名>`）は画像ではないため `status='invalid'` として
+    登録される。学習・評価からは元々除外されるが、枚数の集計を大きく歪めるので削除する。
+
+    戻り値: (該当件数, 例として最大5件のパス)
+    """
+    repo = MetadataRepository(config.get("paths.db_path"))
+    try:
+        rows = repo.conn.execute("SELECT image_id, filepath FROM images").fetchall()
+        junk_ids = [row["image_id"] for row in rows if is_junk_entry(row["filepath"])]
+        samples = [row["filepath"] for row in rows if is_junk_entry(row["filepath"])][:5]
+
+        if junk_ids and not dry_run:
+            with repo.conn:
+                for start in range(0, len(junk_ids), 500):
+                    chunk = junk_ids[start : start + 500]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    repo.conn.execute(f"DELETE FROM images WHERE image_id IN ({placeholders})", chunk)
+            repo.conn.execute("VACUUM")
+    finally:
+        repo.close()
+
+    return len(junk_ids), samples
