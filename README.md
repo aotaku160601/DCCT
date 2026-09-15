@@ -11,7 +11,136 @@ AI-Generated Image Detection* (arXiv:2601.22778, 2026) のスタンドアロン�
 - `04_DB設計書_DCCT再現実装.md`
 - `05_図表集_DCCT再現実装.md`
 
-## セットアップ
+## はじめての実行手順（macOS）
+
+### 0. プロジェクトを置く場所
+
+**コードは Mac の内蔵ディスクに置き、データ（GenImage）だけを外部SSDに置いたままにする。**
+本実装は画像を複製せずパス参照で読むので、外部SSDにコードを置く必要はない
+（外部SSDを外すとリポジトリごと見えなくなるため、むしろ内蔵ディスク推奨）。
+
+置き場所はホーム直下が分かりやすい。
+
+```bash
+cd ~
+git clone https://github.com/aotaku160601/DCCT.git
+cd DCCT
+git checkout claude/dcct-design-review-ianaeo
+```
+
+結果としてこうなる。
+
+```
+~/DCCT/                     ← コード・DB・チェックポイント・レポート（内蔵ディスク）
+/Volumes/Extreme Pro/       ← GenImageのZIP／フォルダ（外部SSD、読むだけ）
+```
+
+以降のコマンドはすべて `~/DCCT` の中で実行する。
+
+### 1. Python環境を作る
+
+```bash
+cd ~/DCCT
+python3 -m venv .venv
+source .venv/bin/activate      # 以降ターミナルを開くたびに必要
+pip install -r requirements.txt
+python -m pytest               # 111件パスすれば環境は正常
+```
+
+`source .venv/bin/activate` を実行するとプロンプトの先頭に `(.venv)` が付く。
+これが付いていない状態でコマンドを打つと「モジュールが無い」と言われる。
+
+### 2. 外部SSDのパスを確認して設定する
+
+```bash
+ls /Volumes                              # マウント名を確認（例: Extreme Pro）
+ls "/Volumes/Extreme Pro"                # 生成器のZIP／フォルダが並んでいるか確認
+```
+
+`configs/base.yaml` の `paths.dataset_root` を、その **ZIP／フォルダが直接並んでいる階層**に
+書き換える（既定は `/Volumes/Extreme Pro`）。パスに空白が含まれるのでクォートは外さないこと。
+
+macOSが外部ボリュームへのアクセス許可を求めてきた場合は許可する。求められないのに
+`Operation not permitted` で読めない場合は、システム設定 →
+プライバシーとセキュリティ → フルディスクアクセス で、使っているターミナルアプリを許可する。
+
+### 3. データベースを作る
+
+```bash
+python -m src.cli init-db --config configs/base.yaml
+```
+
+`db/dcct_metadata.sqlite3` が作られ、テーブル10個が表示されれば成功。
+
+### 4. データを取り込む
+
+まず1000枚だけ、DBに書かずに試す。
+
+```bash
+python -m src.cli ingest --config configs/base.yaml --generator SDv1.4 --limit 1000 --dry-run
+```
+
+`走査 1000 / split=train,val` のように出れば構成判定が合っている。
+`走査 0` や `パスが見つかりません` が出た場合は、`dataset.sources` のファイル名と
+実際のファイル名が食い違っているので、`ls` の結果に合わせて `configs/base.yaml` を直す。
+
+問題なければ本実行する（数分〜数十分かかる）。
+
+```bash
+python -m src.cli ingest --config configs/base.yaml
+```
+
+### 5. 学習する
+
+いきなり全量を回さず、まず数ステップだけ流して1ステップの所要時間を測る。
+
+```bash
+python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml --epochs 1 --max-steps 20
+```
+
+ログの `epoch_seconds` から1エポックの所要時間を見積もり、長すぎる場合は
+`configs/base.yaml` の `data.max_images`（使用枚数の上限）や `train.batch_size` を調整する。
+
+見積りがついたら本番の学習に進む。pθ と qφ は独立なのでターミナルを2つ開いて並列に流してもよい。
+
+```bash
+python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml   # pθ
+python -m src.cli train-stage1 --target ai    --config configs/stage1_ai.yaml      # qφ
+```
+
+両方終わったら、`configs/stage2_classifier.yaml` の `stage2.photo_model_checkpoint` と
+`ai_model_checkpoint` に、それぞれ `checkpoints/stage1_photo/best.pt` /
+`checkpoints/stage1_ai/best.pt` を書いてから分類器を学習する。
+
+```bash
+python -m src.cli train-stage2 --config configs/stage2_classifier.yaml
+```
+
+学習が途中で止まった場合は `--resume checkpoints/stage1_photo/best.pt` のように
+チェックポイントを指定すれば続きから再開できる。
+
+### 6. 評価してレポートを出す
+
+```bash
+python -m src.cli evaluate --mode cross_generator --config configs/stage2_classifier.yaml
+python -m src.cli evaluate --mode robustness      --config configs/stage2_classifier.yaml
+python -m src.cli report --out reports/
+```
+
+`reports/run<番号>/report.md` に表とグラフがまとまる。
+
+### 困ったときに見るところ
+
+| 症状 | 確認すること |
+|---|---|
+| `command not found: python` | `source .venv/bin/activate` を実行したか（`(.venv)` が出ているか） |
+| `ModuleNotFoundError` | 同上。または `pip install -r requirements.txt` が完了しているか |
+| `パスが見つかりません` | `ls /Volumes` のマウント名と `paths.dataset_root` が一致しているか |
+| `Operation not permitted` | ターミナルにフルディスクアクセスを与えたか |
+| `対象画像が0件です` | `ingest` が完了しているか（`--dry-run` を外したか） |
+| 学習が遅すぎる | `data.max_images` で枚数を絞る、`train.batch_size` を下げる |
+
+## セットアップ（詳細）
 
 macOS / Linux:
 

@@ -7,9 +7,11 @@ project:
   seed: 42
 
 paths:
-  # 外部SSD「Extreme Pro」のマウントポイント配下。パスに空白を含むため必ずクォートすること。
-  # 【OI-3】実パスは ingest 実行前に確定させる。
-  dataset_root: "/Volumes/Extreme Pro/GenImage"
+  # 外部SSD「Extreme Pro」のマウントポイント。パスに空白を含むため必ずクォートすること。
+  # 生成器のZIP／フォルダ（genimage-*.zip, BigGAN/ など）が直接置かれている階層を指す。
+  # 実際のマウント名は `ls /Volumes` で確認すること（同名ディスクがあると
+  # "Extreme Pro 1" のように連番が付く）。
+  dataset_root: "/Volumes/Extreme Pro"
   # ZIP展開先。現在はZIPを展開せず直読みする方針のため未使用（README「ZIPは展開しない」参照）。
   # 将来展開方式に切り替える場合の置き場所として残している。
   extract_root: "/Volumes/Extreme Pro/GenImage_extracted"
