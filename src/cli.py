@@ -44,9 +44,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_s1 = sub.add_parser("train-stage1", help="条件付き分布モデル pθ / qφ を学習する")
     p_s1.add_argument("--target", choices=["photo", "ai"], required=True)
     p_s1.add_argument("--config", required=True)
+    p_s1.add_argument("--epochs", type=int, help="configの train.num_epochs を上書きする")
+    p_s1.add_argument("--max-steps", type=int, help="1エポックあたりのステップ数上限（スモークテスト用）")
+    p_s1.add_argument("--resume", help="再開するチェックポイントのパス")
 
     p_s2 = sub.add_parser("train-stage2", help="二値分類器 gψ を学習する")
     p_s2.add_argument("--config", default="configs/stage2_classifier.yaml")
+    p_s2.add_argument("--epochs", type=int, help="configの train.num_epochs を上書きする")
+    p_s2.add_argument("--max-steps", type=int, help="1エポックあたりのステップ数上限（スモークテスト用）")
+    p_s2.add_argument("--resume", help="再開するチェックポイントのパス")
 
     p_eval = sub.add_parser("evaluate", help="評価を実行する")
     p_eval.add_argument("--mode", choices=["cross_generator", "ablation", "robustness"], required=True)
@@ -100,6 +106,33 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_trainer(trainer, args: argparse.Namespace) -> int:
+    with trainer:
+        resume_from = args.resume or trainer.config.get("train.resume_from", None)
+        if resume_from:
+            trainer.load_checkpoint(resume_from, resume=True)
+
+        run_id = trainer.fit(num_epochs=args.epochs, max_steps_per_epoch=args.max_steps)
+
+    print(f"学習が完了しました: run_id={run_id}")
+    print(f"チェックポイント: {trainer.checkpoint_dir}")
+    return 0
+
+
+def cmd_train_stage1(args: argparse.Namespace) -> int:
+    from .train.train_stage1 import TrainerStage1
+
+    config = Config.load(args.config)
+    return _run_trainer(TrainerStage1(config, args.target), args)
+
+
+def cmd_train_stage2(args: argparse.Namespace) -> int:
+    from .train.train_stage2 import TrainerStage2
+
+    config = Config.load(args.config)
+    return _run_trainer(TrainerStage2(config), args)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv)
@@ -107,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "init-db": cmd_init_db,
         "ingest": cmd_ingest,
+        "train-stage1": cmd_train_stage1,
+        "train-stage2": cmd_train_stage2,
     }
     handler = handlers.get(args.command)
     if handler is None:

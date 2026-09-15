@@ -44,14 +44,16 @@ pip install -r requirements.txt
 `configs/base.yaml` の `device.type` は既定 `auto` で、**cuda → mps → cpu** の順に自動選択する
 （`src/experiment/device.py`）。`torch.cuda.*` を直接呼ぶコードは書かない（02_基本設計書 9節）。
 
-- Windows / Linux + NVIDIA GPU → `cuda`
-- macOS + Apple Silicon → `mps`。`device.enable_mps_fallback: true` により
-  `PYTORCH_ENABLE_MPS_FALLBACK=1` を設定し、MPS未対応演算をCPUへ自動フォールバックさせる
-- いずれも無い場合 → `cpu`
+**本実装の想定実行環境は macOS Tahoe + Apple Silicon（`mps`）**（01_要件定義書 5節）。
+`device.enable_mps_fallback: true` により `PYTORCH_ENABLE_MPS_FALLBACK=1` を設定し、
+MPS未対応演算をCPUへ自動フォールバックさせる。
 
-なお設計資料（01/02/03）は macOS + Apple Silicon 前提で書かれているが、実機が Windows の
-場合は `paths.dataset_root` を `E:/GenImage` のようなドライブレター表記にする
-（`/Volumes/Extreme Pro/...` は macOS のマウントポイント）。
+- macOS + Apple Silicon → `mps`（本番）
+- NVIDIA GPU 環境 → `cuda`
+- いずれも無い場合 → `cpu`（CIやスモークテスト用）
+
+`paths.dataset_root` は macOS のマウントポイント `/Volumes/Extreme Pro/...` を指す。
+別OSで動かす場合はこの値だけを差し替える（コード側は変更不要）。
 
 ## ディレクトリ構成
 
@@ -264,6 +266,63 @@ Transformer Encoder に通し、出力を平均プーリングしてから全結
 
 パラメータ数は pθ / qφ が各約1.9M、gψ が約4.1M。
 
+## 学習
+
+```bash
+python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml   # pθ
+python -m src.cli train-stage1 --target ai    --config configs/stage1_ai.yaml      # qφ
+python -m src.cli train-stage2 --config configs/stage2_classifier.yaml             # gψ
+
+# スモークテスト（1エポック・2ステップだけ流す）
+python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml --epochs 1 --max-steps 2
+# 中断からの再開
+python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml --resume checkpoints/stage1_photo/best.pt
+```
+
+Stage I-A（pθ）と Stage I-B（qφ）は独立しているので並列に流せる。両方が終わってから
+そのチェックポイントを `configs/stage2_classifier.yaml` の `stage2.photo_model_checkpoint` /
+`ai_model_checkpoint` に設定して Stage II を実行する。
+
+### データの流れ
+
+`MetadataRepository` → `select_image_rows` → `PatchDataset` → `DataLoader` → 学習ループ。
+
+- 学習に使う画像は `dataset.train_generators`（論文プロトコルではSDv1.4のみ）と、
+  それに対応する実写generator（`ImageNet(real)@SDv1.4`）から選ぶ。
+  `dataset.excluded_generators` のものは自動的に外れる
+- DataLoaderのワーカーは**デコードと64×64クロップまで**を担当し、CFAマスクと
+  ハイパスフィルタはバッチ単位でデバイス上（MPS）で実行する。畳み込みをGPUに任せるため
+- ZIP内画像はワーカーごとにハンドルをキャッシュして読む（`open_image_bytes_cached`）。
+  `ZipFile` はスレッド安全ではないため、ワーカー内は単一スレッドで読む
+- 読めない画像に当たった場合は警告を出して次の画像にフォールバックする（最大5枚まで）
+
+### 記録されるもの（NFR-7）
+
+| テーブル | 内容 |
+|---|---|
+| `experiments` | 実験名・stage・config全文（JSON）・gitコミット（dirty判定つき）・seed |
+| `training_runs` | 実行の開始/終了時刻と status（running / completed / failed） |
+| `training_logs` | エポックごとの損失・精度・学習率・所要秒数 |
+| `model_checkpoints` | 保存したチェックポイントのパスと選択指標 |
+
+例外で落ちた場合も `training_runs.status` は `failed` に更新される。
+
+チェックポイントは `run<run_id>_epoch<NNN>.pt` として毎エポック保存し、検証指標が最良の
+ものを `best.pt` にも保存する（Stage I は `val_nll` 最小、Stage II は `val_accuracy` 最大）。
+モデル重み・オプティマイザ状態・エポック・config・run_idを含むので、`--resume` で
+そのまま学習を再開できる（03_詳細設計書 6節「学習中断」）。
+
+### Ablation の切り替え
+
+| アブレーション | 設定 |
+|---|---|
+| A: 条件付きモデル構成 | `stage2.use_photo_model` / `use_ai_model` |
+| B: ハイパスフィルタ・CFAマスク | `preprocess.use_high_pass` / `use_cfa_mask` |
+| C: truncation閾値 | `preprocess.truncation_t`（Stage Iから再学習が必要） |
+| D: fine-tuning戦略 | `stage2.freeze_conditional_models` |
+
+D を `false` にすると pθ / qφ にも勾配が流れ、チェックポイントにも両モデルが保存される。
+
 ## 設計上の決定事項（Open Issues への回答）
 
 ### OI-1: Midjourneyデータ未取得
@@ -312,5 +371,5 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 - [x] Step 2: メタデータDB初期化（04_DB設計書 4節のDDL）
 - [x] Step 3: データ取り込みバッチ（`ingest`）
 - [x] Step 4: CFAマスク → ハイパスフィルタ → 条件付きモデル(pθ/qφ) → 分類器gψ
-- [ ] Step 5: 学習ループ（Stage I-A/I-B, Stage II）とDataLoader
+- [x] Step 5: 学習ループ（Stage I-A/I-B, Stage II）とDataLoader
 - [ ] Step 6: 評価（cross-generator / ablation / robustness）とレポート出力

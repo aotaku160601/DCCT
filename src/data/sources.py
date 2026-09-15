@@ -148,3 +148,39 @@ def open_image_bytes(filepath: str, max_bytes: int | None = None) -> bytes:
     zip_path, inner = parts
     with zipfile.ZipFile(zip_path) as zf, zf.open(inner) as f:
         return f.read() if max_bytes is None else f.read(max_bytes)
+
+
+# ---------------------------------------------------------------------------
+# 学習・評価時の読み出し（ワーカーごとにZIPハンドルをキャッシュする）
+# ---------------------------------------------------------------------------
+
+# プロセスごとに独立したキャッシュ。DataLoaderの各ワーカーが自分のハンドルを持つ。
+_ZIP_CACHE: dict[str, zipfile.ZipFile] = {}
+
+
+def open_image_bytes_cached(filepath: str) -> bytes:
+    """`open_image_bytes` と同じだが、ZIPハンドルをプロセス内で使い回す。
+
+    1枚ごとにZIPを開き直すと中央ディレクトリの読み直しが発生するため、
+    学習ループではこちらを使う。`ZipFile` はスレッド安全ではないので、
+    DataLoaderのワーカー数は増やしてもワーカー内は単一スレッドで読むこと。
+    """
+    parts = split_zip_path(filepath)
+    if parts is None:
+        with open(filepath, "rb") as f:
+            return f.read()
+
+    zip_path, inner = parts
+    handle = _ZIP_CACHE.get(zip_path)
+    if handle is None:
+        handle = zipfile.ZipFile(zip_path)
+        _ZIP_CACHE[zip_path] = handle
+    with handle.open(inner) as f:
+        return f.read()
+
+
+def close_cached_zips() -> None:
+    """キャッシュしているZIPハンドルをすべて閉じる。"""
+    for handle in _ZIP_CACHE.values():
+        handle.close()
+    _ZIP_CACHE.clear()
