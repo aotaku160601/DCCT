@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import torch
 from torch.utils.data import Dataset
@@ -109,13 +109,19 @@ class MultiPatchDataset(Dataset):
     """1画像につきPパッチを返す（推論・評価用、Algorithm 2）。"""
 
     def __init__(
-        self, rows: Sequence[dict[str, Any]], sampler: PatchSampler, num_patches: int = 16
+        self,
+        rows: Sequence[dict[str, Any]],
+        sampler: PatchSampler,
+        num_patches: int = 16,
+        transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         if not rows:
             raise ValueError("評価対象画像が0件です")
         self.rows = list(rows)
         self.sampler = sampler
         self.num_patches = num_patches
+        # ロバスト性評価用の劣化処理（JPEG圧縮・ダウンサンプリング）。パッチ抽出の前に適用する
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -123,6 +129,8 @@ class MultiPatchDataset(Dataset):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, int]:
         row = self.rows[index]
         image = load_image_tensor(open_image_bytes_cached(row["filepath"]))
+        if self.transform is not None:
+            image = self.transform(image)
         patches = self.sampler.sample_test(image, self.num_patches, image_key=row["filepath"])
         target = torch.tensor(LABEL_TO_TARGET[row["label"]])
         return patches, target, int(row["image_id"])

@@ -323,6 +323,60 @@ Stage I-A（pθ）と Stage I-B（qφ）は独立しているので並列に流�
 
 D を `false` にすると pθ / qφ にも勾配が流れ、チェックポイントにも両モデルが保存される。
 
+## 評価とレポート
+
+```bash
+# Table 1相当（--run-id 省略時は最新の完了済みStage II実行を使う）
+python -m src.cli evaluate --mode cross_generator --config configs/stage2_classifier.yaml --run-id 3
+
+# Figure 6相当（JPEG圧縮・ダウンサンプリング）
+python -m src.cli evaluate --mode robustness --config configs/stage2_classifier.yaml --run-id 3
+
+# Table 4相当（variantごとに学習 → 評価）
+python -m src.cli evaluate --mode ablation --config configs/ablation/ablation_a_dual_model.yaml
+
+# レポート出力
+python -m src.cli report --run-id 3 --out reports/
+```
+
+### 推論（Algorithm 2）
+
+1画像から `inference.num_patches`（既定16）枚のパッチを抽出し、各パッチのスコアを平均して
+閾値τで判定する。パッチ位置はファイルパスをキーにした決定的な乱数で決まるので、
+同じ画像は何度評価しても同じ位置が使われる（NFR-1）。
+
+### 閾値τのチューニング
+
+論文にτの具体値がないため、**val split上でYouden指数（TPR - FPR）が最大になる点**を選ぶ
+（03_詳細設計書 7.3）。test split には触れないので、評価用データで閾値を決めてしまうことはない。
+`evaluate.tune_threshold: false` にすると `inference.threshold` の値をそのまま使う。
+
+判定は Algorithm 2 に従い `score > τ` で行う。scikit-learn の `roc_curve` が返す閾値は
+`score >= τ` を陽性とする規約なので、境界のサンプルが逆に判定されないよう、返す閾値を
+ひとつ下のスコアとの中点まで下げている。
+
+### 評価対象の組み立て
+
+生成器 G の評価には、G のAI画像と `ImageNet(real)@G` の実写画像を使う。
+`evaluate.max_images_per_generator` は**ラベルごとに**適用するので、間引いても
+AI画像と実写画像が同数ずつ残る（まとめてLIMITすると片方のクラスだけになり、
+AccuracyもAUCも意味を持たなくなる）。`dataset.excluded_generators` のものは自動的に外れる。
+
+### 出力
+
+`reports/run<run_id>/` に以下を出力する。
+
+| ファイル | 内容 |
+|---|---|
+| `report.md` | 実験メタ情報＋全表＋グラフを埋め込んだMarkdown |
+| `cross_generator.csv` | 生成器別のAccuracy/AUC/AP（平均行つき） |
+| `ablation.csv` | アブレーション条件ごとの平均Accuracy |
+| `robustness.csv` | 劣化種別・強度ごとのAccuracy |
+| `robustness_jpeg.png` / `robustness_downsample.png` | 劣化強度に対する精度推移の折れ線グラフ |
+
+同じ条件を再評価した場合、`evaluation_results` には履歴として残るが、レポートには
+最新の1件だけを載せる。グラフは日本語フォントに依存しないよう、図中のラベルは英語で描画する。
+
 ## 設計上の決定事項（Open Issues への回答）
 
 ### OI-1: Midjourneyデータ未取得
@@ -372,4 +426,4 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 - [x] Step 3: データ取り込みバッチ（`ingest`）
 - [x] Step 4: CFAマスク → ハイパスフィルタ → 条件付きモデル(pθ/qφ) → 分類器gψ
 - [x] Step 5: 学習ループ（Stage I-A/I-B, Stage II）とDataLoader
-- [ ] Step 6: 評価（cross-generator / ablation / robustness）とレポート出力
+- [x] Step 6: 評価（cross-generator / ablation / robustness）とレポート出力

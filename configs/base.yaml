@@ -141,3 +141,15 @@ data:
 inference:
   num_patches: 16           # P
   threshold: 0.5            # τ の初期値。val上でYouden指数最大化によりチューニングする
+
+evaluate:
+  # 評価に使う分類器チェックポイント（--run-id を指定した場合はDBから自動解決される）
+  classifier_checkpoint: null
+  # val split上でYouden指数を最大化する閾値τを求めてから評価する（03_詳細設計書 7.3）
+  tune_threshold: true
+  # 1生成器あたりの評価枚数上限（null = 全件）
+  max_images_per_generator: null
+  robustness:
+    # Figure 6相当。JPEG品質係数と空間ダウンサンプリング倍率
+    jpeg_qualities: [100, 90, 80, 70]
+    downsample_ratios: [0.9, 0.8, 0.7, 0.6]

@@ -56,11 +56,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_eval = sub.add_parser("evaluate", help="評価を実行する")
     p_eval.add_argument("--mode", choices=["cross_generator", "ablation", "robustness"], required=True)
-    p_eval.add_argument("--config")
-    p_eval.add_argument("--experiment-id", type=int)
+    p_eval.add_argument("--config", default="configs/stage2_classifier.yaml")
+    p_eval.add_argument("--run-id", type=int, help="評価対象のStage II実行ID（省略時は最新の完了実行）")
+    p_eval.add_argument("--experiment-id", type=int, help="実験IDから実行IDを解決する")
+    p_eval.add_argument("--checkpoint", help="分類器チェックポイントを明示的に指定する")
+    p_eval.add_argument("--split", default="test", choices=["train", "val", "test"])
+    p_eval.add_argument("--epochs", type=int, help="ablationモード: 各variantの学習エポック数")
+    p_eval.add_argument("--max-steps", type=int, help="ablationモード: 1エポックのステップ数上限")
+    p_eval.add_argument("--variant", action="append", dest="variants", help="ablationモード: 実行するvariantのlabel")
 
     p_report = sub.add_parser("report", help="結果レポートを出力する")
-    p_report.add_argument("--experiment-id", type=int, required=True)
+    p_report.add_argument("--config", default="configs/base.yaml")
+    p_report.add_argument("--run-id", type=int, help="対象の実行ID（省略時は最新の完了実行）")
+    p_report.add_argument("--experiment-id", type=int, help="実験IDから実行IDを解決する")
     p_report.add_argument("--out", default="reports/")
 
     return parser
@@ -133,6 +141,110 @@ def cmd_train_stage2(args: argparse.Namespace) -> int:
     return _run_trainer(TrainerStage2(config), args)
 
 
+def _resolve_run(repo, run_id: int | None, experiment_id: int | None) -> int:
+    """評価・レポート対象の run_id を決める。"""
+    if run_id is not None:
+        return run_id
+
+    if experiment_id is not None:
+        row = repo.conn.execute(
+            "SELECT run_id FROM training_runs WHERE experiment_id = ? ORDER BY run_id DESC LIMIT 1",
+            (experiment_id,),
+        ).fetchone()
+        if row is None:
+            raise SystemExit(f"experiment_id={experiment_id} に紐づく実行が見つかりません")
+        return int(row["run_id"])
+
+    row = repo.conn.execute(
+        """
+        SELECT r.run_id FROM training_runs r
+        JOIN experiments e ON e.experiment_id = r.experiment_id
+        WHERE e.stage = 'stage2_classifier' AND r.status = 'completed'
+        ORDER BY r.run_id DESC LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        raise SystemExit("完了済みのStage II実行が見つかりません。--run-id を指定してください")
+    return int(row["run_id"])
+
+
+def _resolve_classifier_checkpoint(repo, run_id: int) -> str | None:
+    """その実行が保存したチェックポイント（best.pt優先）を探す。"""
+    rows = repo.conn.execute(
+        "SELECT filepath FROM model_checkpoints WHERE run_id = ? ORDER BY checkpoint_id DESC", (run_id,)
+    ).fetchall()
+    for row in rows:
+        if row["filepath"].endswith("best.pt"):
+            return row["filepath"]
+    return rows[0]["filepath"] if rows else None
+
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    from .data.repository import MetadataRepository
+    from .eval.evaluator import Evaluator
+
+    config = Config.load(args.config)
+
+    if args.mode == "ablation":
+        from .eval.ablation import run_ablation
+
+        results = run_ablation(
+            config,
+            num_epochs=args.epochs,
+            max_steps_per_epoch=args.max_steps,
+            only_labels=args.variants,
+        )
+        print()
+        print(f"{'variant':<16}{'run_id':>8}{'mAcc':>10}  条件")
+        for result in results:
+            accuracy = f"{result.mean_accuracy:.4f}" if result.mean_accuracy is not None else "N/A"
+            params = ", ".join(f"{k}={v}" for k, v in result.parameters.items())
+            print(f"{result.label:<16}{result.run_id:>8}{accuracy:>10}  {params}")
+        return 0
+
+    with MetadataRepository(config.get("paths.db_path")) as repo:
+        run_id = _resolve_run(repo, args.run_id, args.experiment_id)
+        checkpoint = args.checkpoint or _resolve_classifier_checkpoint(repo, run_id)
+
+    with Evaluator(config, run_id, checkpoint) as evaluator:
+        if args.mode == "cross_generator":
+            results = evaluator.run_cross_generator(split=args.split)
+        else:
+            results = evaluator.run_robustness(split=args.split)
+        threshold = evaluator.threshold
+
+    print()
+    print(f"run_id={run_id} 閾値τ={threshold:.4f}")
+    print(f"{'生成器':<14}{'劣化':>12}{'強度':>8}{'Accuracy':>10}{'AUC':>10}{'AP':>10}{'枚数':>8}")
+    for result in results:
+        metrics = result.metrics
+        print(
+            f"{result.generator:<14}{result.perturbation_type:>12}"
+            f"{'' if result.perturbation_level is None else result.perturbation_level:>8}"
+            f"{metrics['accuracy']:>10.4f}"
+            f"{(metrics['auc'] if metrics['auc'] is not None else float('nan')):>10.4f}"
+            f"{(metrics['ap'] if metrics['ap'] is not None else float('nan')):>10.4f}"
+            f"{metrics['num_samples']:>8}"
+        )
+    if results:
+        mean_accuracy = sum(r.metrics["accuracy"] for r in results) / len(results)
+        print(f"\n平均Accuracy: {mean_accuracy:.4f}")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from .data.repository import MetadataRepository
+    from .report.report_builder import build_report
+
+    config = Config.load(args.config)
+    with MetadataRepository(config.get("paths.db_path")) as repo:
+        run_id = _resolve_run(repo, args.run_id, args.experiment_id)
+
+    path = build_report(config, run_id, args.out)
+    print(f"レポートを出力しました: {path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv)
@@ -142,10 +254,11 @@ def main(argv: list[str] | None = None) -> int:
         "ingest": cmd_ingest,
         "train-stage1": cmd_train_stage1,
         "train-stage2": cmd_train_stage2,
+        "evaluate": cmd_evaluate,
+        "report": cmd_report,
     }
     handler = handlers.get(args.command)
-    if handler is None:
-        # Step 3以降で順次実装していく。未実装コマンドは明示的に失敗させる。
+    if handler is None:  # pragma: no cover - argparse が先に弾く
         raise NotImplementedError(f"コマンド '{args.command}' は未実装です。")
     return handler(args)
 
