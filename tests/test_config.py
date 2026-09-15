@@ -1,0 +1,62 @@
+"""実験config読み込み（extends継承・検証）のテスト。"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.experiment.config import Config
+from src.experiment.paths import PROJECT_ROOT
+
+CONFIG_FILES = sorted((PROJECT_ROOT / "configs").rglob("*.yaml"))
+
+
+@pytest.mark.parametrize("path", CONFIG_FILES, ids=lambda p: str(p.relative_to(PROJECT_ROOT)))
+def test_all_shipped_configs_load(path):
+    """configs/ 配下の全YAMLが読み込め、検証を通ること。"""
+    cfg = Config.load(path)
+    assert cfg.get("paths.db_path")
+
+
+def test_extends_merges_recursively(tmp_path):
+    (tmp_path / "parent.yaml").write_text(
+        "paths:\n  db_path: db/a.sqlite3\n  log_root: logs\n"
+        "project:\n  seed: 42\n"
+        "train:\n  batch_size: 16\n  learning_rate: 1.0e-4\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "child.yaml").write_text(
+        "extends: parent.yaml\ntrain:\n  batch_size: 8\n", encoding="utf-8"
+    )
+
+    cfg = Config.load(tmp_path / "child.yaml")
+    assert cfg.get("train.batch_size") == 8          # 子で上書き
+    assert cfg.get("train.learning_rate") == 1.0e-4  # 親から継承
+    assert cfg.get("paths.log_root") == "logs"
+
+
+def test_missing_key_raises():
+    cfg = Config.load(PROJECT_ROOT / "configs" / "base.yaml")
+    with pytest.raises(KeyError):
+        cfg.get("no.such.key")
+    assert cfg.get("no.such.key", "fallback") == "fallback"
+
+
+def test_invalid_device_type_rejected(tmp_path):
+    (tmp_path / "bad.yaml").write_text(
+        "paths:\n  db_path: db/a.sqlite3\nproject:\n  seed: 1\ndevice:\n  type: tpu\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="device.type"):
+        Config.load(tmp_path / "bad.yaml")
+
+
+def test_midjourney_excluded_by_default():
+    """【OI-1】既定では Midjourney が除外対象に入っていること。"""
+    cfg = Config.load(PROJECT_ROOT / "configs" / "base.yaml")
+    assert "Midjourney" in cfg.get("dataset.excluded_generators")
+
+
+def test_classifier_feature_source_is_mixture_params():
+    """【OI-2】既定の分類器入力特徴は案A（混合分布パラメータ）であること。"""
+    cfg = Config.load(PROJECT_ROOT / "configs" / "base.yaml")
+    assert cfg.get("model.classifier.feature_source") == "mixture_params"

@@ -14,7 +14,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
+
+from .data import db as db_module
+from .experiment.config import Config
+from .experiment.paths import resolve
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,11 +52,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def cmd_init_db(args: argparse.Namespace) -> int:
+    config = Config.load(args.config)
+    db_path = config.get("paths.db_path")
+
+    applied = db_module.init_db(db_path, force=args.force)
+    tables = db_module.table_names(db_path)
+
+    print(f"メタデータDB: {resolve(db_path)}")
+    if applied:
+        print(f"適用したマイグレーション: {', '.join(applied)}")
+    else:
+        print("適用したマイグレーション: なし（すべて適用済み）")
+    print(f"テーブル({len(tables)}): {', '.join(tables)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv)
 
-    # Step 2以降で順次実装していく。未実装コマンドは明示的に失敗させる。
-    raise NotImplementedError(f"コマンド '{args.command}' は未実装です。")
+    handlers = {
+        "init-db": cmd_init_db,
+    }
+    handler = handlers.get(args.command)
+    if handler is None:
+        # Step 3以降で順次実装していく。未実装コマンドは明示的に失敗させる。
+        raise NotImplementedError(f"コマンド '{args.command}' は未実装です。")
+    return handler(args)
 
 
 if __name__ == "__main__":

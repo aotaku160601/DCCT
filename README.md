@@ -73,6 +73,28 @@ MPS未対応演算をCPUへ自動フォールバックさせる。
 | `python -m src.cli evaluate --mode cross_generator --experiment-id <ID>` | Table1相当の評価 |
 | `python -m src.cli report --experiment-id <ID> --out reports/` | レポート出力 |
 
+## メタデータDB
+
+04_DB設計書 4節のDDLと5節のインデックスを `migrations/0001_init.sql` にそのまま格納している。
+
+```bash
+python -m src.cli init-db --config configs/base.yaml          # 未適用のマイグレーションを適用
+python -m src.cli init-db --config configs/base.yaml --force  # バックアップを取って作り直す
+```
+
+- 適用済みマイグレーションは `schema_migrations` テーブルで管理する（設計書のDDLには含まれない
+  ランナー側の管理テーブル）。`init-db` は冪等で、再実行しても既存データを壊さない。
+- `--force` は削除前に `db/backups/dcct_metadata_<timestamp>.sqlite3` へコピーを退避する
+  （04_DB設計書 7節「バックアップ」）。
+- 接続時に `PRAGMA foreign_keys = ON` と `journal_mode = WAL` を設定する。
+- スキーマ変更はDBファイルを直接編集せず、`migrations/0002_*.sql` を追加して行う。
+
+## テスト
+
+```bash
+python -m pytest
+```
+
 ## 設計上の決定事項（Open Issues への回答）
 
 ### OI-1: Midjourneyデータ未取得
@@ -117,6 +139,6 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 ## 実装進捗
 
 - [x] Step 1: プロジェクト雛形・仮想環境・requirements.txt
-- [ ] Step 2: メタデータDB初期化（04_DB設計書 4節のDDL）
+- [x] Step 2: メタデータDB初期化（04_DB設計書 4節のDDL）
 - [ ] Step 3: データ取り込みバッチ（`ingest`）
 - [ ] Step 4: CFAマスク → ハイパスフィルタ → 条件付きモデル(pθ/qφ) → 分類器gψ
