@@ -49,9 +49,13 @@ class IngestStats:
     by_split: dict[str, int] = field(default_factory=dict)
     skipped_reason: str | None = None
 
+    dry_run: bool = False
+
     @property
     def already_registered(self) -> int:
-        """既にDBにある（＝今回挿入されなかった）枚数。"""
+        """既にDBにある（＝今回挿入されなかった）枚数。dry-run時は判定できないので0。"""
+        if self.dry_run:
+            return 0
         return self.scanned - self.inserted - self.unclassified
 
 
@@ -208,7 +212,7 @@ def ingest(
 
         for spec in sources_cfg:
             name = spec["name"]
-            stats = IngestStats(generator=name)
+            stats = IngestStats(generator=name, dry_run=dry_run)
 
             if only_generators and name not in only_generators:
                 continue
@@ -249,7 +253,10 @@ def ingest(
             )
 
             logger.info("走査開始: %s -> %s", name, source_path)
-            with open_source(source_path, spec.get("type", "auto")) as source:
+            # --no-probe のときはファイルごとの stat も省く（ディレクトリ走査の主コスト）
+            with open_source(
+                source_path, spec.get("type", "auto"), collect_size=probe_header
+            ) as source:
                 rows = _iter_rows(
                     source,
                     dataset_id=dataset_id,

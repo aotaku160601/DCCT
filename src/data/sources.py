@@ -87,36 +87,62 @@ class ImageSource(ABC):
 class DirectorySource(ImageSource):
     """展開済みディレクトリを走査するソース。
 
-    `Path.rglob` ではなく `os.scandir` を使う。ツリー全体をリスト化せずに済み、
-    ディレクトリエントリから種別とサイズを取れるため、外部SSD（特にexFAT）のように
-    1ファイルあたりのシステムコールが高くつく環境で差が出る。
+    `Path.rglob` ではなく `os.scandir` を**遅延的に**使う。GenImageは1ディレクトリに
+    10万件以上のファイルが入るため、ツリー全体をリスト化してソートすると、1件目を
+    返すまでに数十秒待たされる（外部SSD・exFATでは特に顕著）。ここではディレクトリを
+    読みながら随時返し、サブディレクトリだけを名前順に辿る。
+
+    ファイルの返却順はファイルシステム依存になるが、split割当はパスのハッシュで決まる
+    （順序に依存しない）ため再現性には影響しない。`--limit` はスモークテスト用であり、
+    どのファイルが選ばれるかは環境依存になる。
     """
+
+    def __init__(self, root: Path, collect_size: bool = True) -> None:
+        super().__init__(root)
+        # サイズ取得はファイルごとに stat が要る。不要なら省いて走査を速くする
+        self.collect_size = collect_size
 
     def iter_entries(self) -> Iterator[ImageEntry]:
         yield from self._walk(self.root)
 
     def _walk(self, directory: Path) -> Iterator[ImageEntry]:
+        subdirectories: list[Path] = []
         try:
-            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+            scanner = os.scandir(directory)
         except OSError:
             return
 
-        for entry in entries:
-            if entry.name in JUNK_DIRECTORIES or entry.name.startswith("._"):
-                continue
-            if entry.is_dir(follow_symlinks=False):
-                yield from self._walk(Path(entry.path))
-                continue
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            if Path(entry.name).suffix.lower() not in IMAGE_SUFFIXES or entry.name in JUNK_FILENAMES:
-                continue
+        with scanner:
+            for entry in scanner:
+                if entry.name in JUNK_DIRECTORIES or entry.name.startswith("._"):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        subdirectories.append(Path(entry.path))
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                if Path(entry.name).suffix.lower() not in IMAGE_SUFFIXES or entry.name in JUNK_FILENAMES:
+                    continue
 
-            yield ImageEntry(
-                relpath=Path(entry.path).relative_to(self.root).as_posix(),
-                size_bytes=entry.stat().st_size,
-                filepath=entry.path,
-            )
+                size = 0
+                if self.collect_size:
+                    try:
+                        size = entry.stat().st_size
+                    except OSError:
+                        size = 0
+
+                yield ImageEntry(
+                    relpath=Path(entry.path).relative_to(self.root).as_posix(),
+                    size_bytes=size,
+                    filepath=entry.path,
+                )
+
+        # サブディレクトリ数は少ないので、こちらは名前順に辿る
+        for subdirectory in sorted(subdirectories):
+            yield from self._walk(subdirectory)
 
     def open(self, entry: ImageEntry) -> IO[bytes]:
         return (self.root / entry.relpath).open("rb")
@@ -161,7 +187,7 @@ class ZipSource(ImageSource):
             self._zf = None
 
 
-def open_source(path: str | Path, source_type: str = "auto") -> ImageSource:
+def open_source(path: str | Path, source_type: str = "auto", collect_size: bool = True) -> ImageSource:
     """パスとタイプ指定から適切な `ImageSource` を返す。"""
     p = Path(path)
     if source_type == "auto":
@@ -169,7 +195,7 @@ def open_source(path: str | Path, source_type: str = "auto") -> ImageSource:
     if source_type == "zip":
         return ZipSource(p)
     if source_type == "dir":
-        return DirectorySource(p)
+        return DirectorySource(p, collect_size=collect_size)
     raise ValueError(f"未知のソースタイプです: {source_type!r}")
 
 

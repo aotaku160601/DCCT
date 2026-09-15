@@ -324,3 +324,37 @@ def test_no_probe_skips_header_reading(config):
         row = repo.conn.execute("SELECT width, height, status, is_croppable FROM images LIMIT 1").fetchone()
     assert row["width"] is None and row["height"] is None
     assert row["status"] == "valid" and row["is_croppable"] == 1
+
+
+def test_directory_scan_is_lazy(tmp_path):
+    """巨大なディレクトリでも、全件をリスト化せずに先頭から順に返すこと。
+
+    GenImageは1ディレクトリに10万件以上入るため、ここで全件を材料化すると
+    1件目を返すまでに長時間待たされる（外部SSDで顕著）。
+    """
+    from src.data.sources import DirectorySource
+
+    image_dir = tmp_path / "gen" / "train" / "ai"
+    image_dir.mkdir(parents=True)
+    for i in range(50):
+        (image_dir / f"img_{i:03d}.png").write_bytes(_png_bytes())
+
+    entries = DirectorySource(tmp_path / "gen").iter_entries()
+    first = next(entries)                      # 全件読まずに1件目が取れる
+    assert first.relpath.startswith("train/ai/")
+    assert first.size_bytes > 0
+
+    assert len(list(entries)) == 49
+
+
+def test_directory_scan_can_skip_size_lookup(tmp_path):
+    """collect_size=False では stat を省くのでサイズは0になる。"""
+    from src.data.sources import DirectorySource
+
+    image_dir = tmp_path / "gen" / "train" / "ai"
+    image_dir.mkdir(parents=True)
+    (image_dir / "img.png").write_bytes(_png_bytes())
+
+    entry = next(DirectorySource(tmp_path / "gen", collect_size=False).iter_entries())
+    assert entry.size_bytes == 0
+    assert entry.relpath == "train/ai/img.png"
