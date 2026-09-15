@@ -87,6 +87,10 @@ preprocess:
   truncation_t: 7           # t
   use_cfa_mask: true        # Ablation-B で false に切替（ランダムRGB選択マスクになる）
   use_high_pass: true       # Ablation-B で false に切替（素通し）
+  bayer_pattern: RGGB       # RGGB / BGGR / GRBG / GBRG
+  # SRMと同じく残差を丸めてから[-t,t]にクリップし、{-t,...,t}の離散値にする。
+  # 条件付きモデルの尤度を離散化ロジスティック混合（PixelCNN++）で書くための前提。
+  quantize_residual: true
 
 augmentation:
   # FR-10: 学習時のベナイン摂動
@@ -100,6 +104,12 @@ model:
   conditional_unet:
     num_mixtures: 10        # K
     base_channels: 64
+    # 予測対象 y' の作り方（03_詳細設計書の 1.2 と 3.3/3.4 で記述が食い違うため設定化）
+    #   single_filter: 1種類のカーネルのみ y に適用し 2ch を保つ（既定。3.3/3.4と整合）
+    #   filter_bank:   30種すべてを y に適用し 60ch とする（1.2の記述どおり）
+    #                  この場合 classifier.feature_source は bottleneck にする必要がある
+    target_mode: single_filter
+    target_filter: square5x5
   classifier:
     resnet_blocks: 4
     transformer_layers: 2

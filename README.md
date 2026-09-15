@@ -13,13 +13,26 @@ AI-Generated Image Detection* (arXiv:2601.22778, 2026) のスタンドアロン�
 
 ## セットアップ
 
+macOS / Linux:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Linux/コンテナ上でCPUのみ動かす場合は、CPU版wheelを先に入れてから残りを入れる:
+Windows (PowerShell):
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+`python` が「Python」とだけ表示して何も起きない場合は、Microsoft Store のスタブが
+呼ばれている。`py -3` を使うか、python.org 版をインストールして PATH に通すこと。
+
+CPUのみで動かす場合は、CPU版wheelを先に入れてから残りを入れる:
 
 ```bash
 pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
@@ -28,10 +41,17 @@ pip install -r requirements.txt
 
 ### 実行デバイス
 
-`configs/base.yaml` の `device.type` は既定 `auto` で、**cuda → mps → cpu** の順に自動選択する。
-`torch.cuda.*` を直接呼ぶコードは書かない（02_基本設計書 9節）。macOS実行時は
-`device.enable_mps_fallback: true` により `PYTORCH_ENABLE_MPS_FALLBACK=1` を設定し、
-MPS未対応演算をCPUへ自動フォールバックさせる。
+`configs/base.yaml` の `device.type` は既定 `auto` で、**cuda → mps → cpu** の順に自動選択する
+（`src/experiment/device.py`）。`torch.cuda.*` を直接呼ぶコードは書かない（02_基本設計書 9節）。
+
+- Windows / Linux + NVIDIA GPU → `cuda`
+- macOS + Apple Silicon → `mps`。`device.enable_mps_fallback: true` により
+  `PYTORCH_ENABLE_MPS_FALLBACK=1` を設定し、MPS未対応演算をCPUへ自動フォールバックさせる
+- いずれも無い場合 → `cpu`
+
+なお設計資料（01/02/03）は macOS + Apple Silicon 前提で書かれているが、実機が Windows の
+場合は `paths.dataset_root` を `E:/GenImage` のようなドライブレター表記にする
+（`/Volumes/Extreme Pro/...` は macOS のマウントポイント）。
 
 ## ディレクトリ構成
 
@@ -161,6 +181,89 @@ width/height を取得する。これにより ingest 時点で
 生成器はDBに残り、`--generator` で失敗分だけ再実行できる。`filepath` が UNIQUE のため
 再実行しても重複登録は起きない。
 
+## 前処理とモデル
+
+Algorithm 1 / 2 の各行に対応するクラスは次のとおり。
+
+| クラス | ファイル | 役割 |
+|---|---|---|
+| `CFAMask` / `RandomChannelMask` | `src/preprocess/cfa_mask.py` | 観測1ch（x）と隠された2ch（y）への分離 |
+| `HighPassFilterBank` | `src/preprocess/highpass.py` | SRM 30種フィルタと truncation |
+| `PatchSampler` | `src/preprocess/patch_sampler.py` | 64×64クロップ、JPEG拡張、推論時のPパッチ |
+| `DCCTPreprocessor` | `src/preprocess/pipeline.py` | 上記を束ねて (x', y') を作る |
+| `ConditionalUNet` / `MixtureParams` | `src/model/conditional_unet.py` | pθ / qφ |
+| `NLLLoss` / `BCELoss` | `src/model/losses.py` | Stage I / Stage II の損失 |
+| `BinaryClassifier` | `src/model/classifier.py` | gψ（ResNet + Transformer） |
+| ファクトリ | `src/experiment/builders.py` | configからの組み立て |
+
+画素値は **0〜255スケールのfloatのまま**扱う。truncation閾値 t=7 はこのスケールに対する値で、
+[0,1] へ正規化してしまうと意味を持たなくなるため。
+
+### CFAマスク
+
+Bayer配列（既定RGGB）に従って画素ごとに1chを観測とし、残り2chを y とする。
+y のチャンネル順は常にRGBインデックスの昇順（観測がRなら (G,B)、Gなら (R,B)、Bなら (R,G)）。
+x と y を合わせると元のRGBが過不足なく復元できることをテストで担保している。
+Ablation-B の「CFAマスクなし」は `RandomChannelMask`（画素ごとにランダムな1ch）に差し替える。
+
+### 30種ハイパスフィルタ
+
+論文Fig.7のプロトタイプカーネルとその回転で30種を構成する方針（03_詳細設計書 7.2）に従い、
+SRM (Fridrich & Kodovsky, 2012) の残差フィルタから次の内訳で構成した。
+
+| 種類 | 枚数 | 正規化係数 q |
+|---|---|---|
+| 1次微分 8方向 | 8 | 1 |
+| 2次微分 4方向 | 4 | 2 |
+| 3次微分 8方向 | 8 | 3 |
+| EDGE3x3 4回転 | 4 | 4 |
+| SQUARE3x3 | 1 | 4 |
+| EDGE5x5 4回転 | 4 | 12 |
+| SQUARE5x5 | 1 | 12 |
+| **合計** | **30** | |
+
+全カーネルの係数和が0（＝平坦画像への応答が0）であることをテストで確認している。
+SRMの残差量子化 `trunc(round(K*I/q), T)` に倣い、q で割った後に丸めてから [-t, t] に
+クリップするため、残差は {-7, ..., 7} の15値をとる離散量になる
+（`preprocess.quantize_residual: false` で丸めを外せる）。
+
+### 条件付きモデルの予測対象 y'（設計書の記述の食い違い）
+
+03_詳細設計書の中で y' のチャンネル数の扱いが分かれている。
+
+- §1.2: `y' ← Truncate(Stack([h_m * y for m in 1..M]))` → 30種×2ch = **60ch**
+- §3.3 / §3.4: μ, s は各 `[K,2,H,W]`、`NLLLoss` の入力 y' は `[2,H,W]` → **2ch**
+
+§1.2 のとおり60chにすると混合分布パラメータは 3×K×60 = 1800ch/モデルとなり、
+すでに確定した案A（分類器入力120ch）と両立しない。OI-2 で §3.3 を採ったのと同じ理由で、
+ここでも §3.3 / §3.4 を優先し **既定は2ch** とする。
+
+| `model.conditional_unet.target_mode` | y' | 備考 |
+|---|---|---|
+| `single_filter`（既定） | 2ch | `target_filter`（既定 `square5x5`）1種類のみ y に適用 |
+| `filter_bank` | 60ch | §1.2の記述どおり。`classifier.feature_source: bottleneck` が必須（config検証で強制） |
+
+x'（条件付けの入力）は **どちらのモードでも30種すべてを適用した30ch**である。
+
+### 混合分布の尤度
+
+残差が離散値であることに合わせ、PixelCNN++ と同じ**離散化ロジスティック混合**で尤度を計算する。
+幅1のビンに対する確率 `σ((v+0.5-μ)/s) - σ((v-0.5-μ)/s)` を用い、両端 ±t のビンは裾全体を
+確率質量とする。{-7,...,7} にわたる確率の総和が1になることをテストで確認している。
+
+`NLLLoss` の `reduction` は既定 `mean`（要素平均）。03_詳細設計書 3.4 は「全画素で総和」と
+記載しているが、損失スケールが約8000倍になり学習率1e-4と釣り合わないため既定を平均とした
+（`sum` / `sum_per_sample` も選べる。勾配の向きは同じ）。
+
+### 分類器のトークン化（03_詳細設計書 7.4 の確定）
+
+ResNetブロック4段で 64×64 → 4×4 まで空間解像度を落とし、残った 4×4 = 16 個の空間位置を
+それぞれ1トークン（次元256）として扱う。学習可能な位置埋め込みを加えて2層の
+Transformer Encoder に通し、出力を平均プーリングしてから全結合層でロジットを出す。
+シグモイドは `BCEWithLogits` 側に含める。
+
+パラメータ数は pθ / qφ が各約1.9M、gψ が約4.1M。
+
 ## 設計上の決定事項（Open Issues への回答）
 
 ### OI-1: Midjourneyデータ未取得
@@ -197,14 +300,17 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 | ID | 状態 |
 |---|---|
 | OI-3 外部SSDマウントパス・ZIP展開先 | `paths.dataset_root` に外出し済み（既定 `/Volumes/Extreme Pro`）。ZIPは展開せず直読みするため展開先は不要（`paths.extract_root` は未使用） |
-| OI-4 / OI-5 GPU・チップ種別・SSDフォーマット | デバイス抽象化で吸収。学習時間はスモークテストで実測する |
-| 03-7.2 SRM 30種カーネル係数 | SRM (Fridrich & Kodovsky, 2012) の公開係数を一次参照として実装予定 |
+| OI-4 / OI-5 GPU・チップ種別・SSDフォーマット | デバイス抽象化で吸収済み。実機がWindowsのため、GPUの有無と `dataset_root` のドライブレターは要確認 |
+| 03-7.2 SRM 30種カーネル係数 | 実装済み（上表の内訳）。論文Fig.7との照合は論文入手時に実施 |
 | 03-7.3 判定閾値 τ | 既定0.5。val上でYouden指数最大化によりチューニング |
-| 03-7.4 Transformerのトークン化 | ResNet出力の空間特徴マップをパッチ分割してトークン化。実装確定時に本READMEへ追記 |
+| 03-7.4 Transformerのトークン化 | 確定済み（4×4=16トークン、次元256、平均プーリング）|
+| 03-1.2 vs 3.3 y'のチャンネル数 | 2ch（`target_mode: single_filter`）を既定として確定。60chも設定で選べる |
 
 ## 実装進捗
 
 - [x] Step 1: プロジェクト雛形・仮想環境・requirements.txt
 - [x] Step 2: メタデータDB初期化（04_DB設計書 4節のDDL）
 - [x] Step 3: データ取り込みバッチ（`ingest`）
-- [ ] Step 4: CFAマスク → ハイパスフィルタ → 条件付きモデル(pθ/qφ) → 分類器gψ
+- [x] Step 4: CFAマスク → ハイパスフィルタ → 条件付きモデル(pθ/qφ) → 分類器gψ
+- [ ] Step 5: 学習ループ（Stage I-A/I-B, Stage II）とDataLoader
+- [ ] Step 6: 評価（cross-generator / ablation / robustness）とレポート出力

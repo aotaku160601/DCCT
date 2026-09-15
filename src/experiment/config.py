@@ -109,5 +109,22 @@ class Config:
                 f"model.classifier.feature_source は mixture_params/bottleneck のいずれか: {feature_source!r}"
             )
 
+        target_mode = self.get("model.conditional_unet.target_mode", "single_filter")
+        if target_mode not in ("single_filter", "filter_bank"):
+            raise ValueError(
+                f"model.conditional_unet.target_mode は single_filter/filter_bank のいずれか: {target_mode!r}"
+            )
+        if target_mode == "filter_bank" and feature_source == "mixture_params":
+            # y' が60chになると混合分布パラメータは 3*K*60 = 1800ch/モデルとなり、
+            # 案A（分類器入力120ch）と両立しない
+            raise ValueError(
+                "target_mode=filter_bank のときは classifier.feature_source=bottleneck にしてください"
+                "（混合分布パラメータが 3*K*60 チャンネルになり案Aの前提と矛盾するため）"
+            )
+
+        bayer = self.get("preprocess.bayer_pattern", "RGGB")
+        if bayer not in ("RGGB", "BGGR", "GRBG", "GBRG"):
+            raise ValueError(f"preprocess.bayer_pattern が不正です: {bayer!r}")
+
     def __repr__(self) -> str:  # pragma: no cover - デバッグ用
         return f"Config(source_path={self.source_path})"
