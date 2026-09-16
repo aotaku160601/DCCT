@@ -26,3 +26,8 @@ train:
   checkpoint_dir: checkpoints/stage2_classifier
   save_every_epoch: 1
   resume_from: null
+
+  # Stage I と同じ考え方で1エポックを区切る。Stage IIは条件付きモデル2本を通すぶん
+  # 1ステップが重いので、まず2,500ステップ/エポックで様子を見る
+  max_steps_per_epoch: 2500
+  max_eval_steps: 100

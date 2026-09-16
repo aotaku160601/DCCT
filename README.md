@@ -116,8 +116,18 @@ dcct status --config configs/base.yaml     # 何枚入ったか確認
 dcct train-stage1 --target photo --config configs/stage1_photo.yaml --epochs 1 --max-steps 20
 ```
 
-ログの `epoch_seconds` から1エポックの所要時間を見積もり、長すぎる場合は
-`configs/base.yaml` の `data.max_images`（使用枚数の上限）や `train.batch_size` を調整する。
+ログの `epoch_seconds` から1エポックの所要時間を見積もる。
+
+**1エポックの区切り方について。** GenImageは1生成器あたり学習対象が約15万枚あり、
+batch 16 ではフル1エポックが 9,607ステップになる。Mac Studio (MPS) の実測は約22バッチ/秒
+なので、フル1エポックは7〜16分、20エポックでは2.5〜5時間かかる計算になる。
+1.9Mパラメータのモデルに192,000ステップは過剰なため、`configs/stage1_*.yaml` では
+**1エポック = 2,500ステップ**に区切り、合計50,000ステップとしている
+（毎エポック再シャッフルされるので、エポックごとに違う画像が使われる）。
+
+実機がこれより遅い／速い場合は `train.max_steps_per_epoch` と `train.num_epochs` で
+調整する。最初のエポックのログが出た時点で1エポックの実時間が分かるので、
+そこで止めて数字を変えてもよい（`--resume` で続きから再開できる）。
 
 見積りがついたら本番の学習に進む。pθ と qφ は独立なのでターミナルを2つ開いて並列に流してもよい。
 
