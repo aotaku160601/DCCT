@@ -19,6 +19,9 @@ import yaml
 
 _MAX_EXTENDS_DEPTH = 10
 
+# src/preprocess/highpass.py が構成するSRMカーネルの枚数（論文のM）
+NUM_HIGHPASS_FILTERS = 30
+
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """`base` に `override` を再帰的に重ねた新しい辞書を返す。"""
@@ -125,6 +128,22 @@ class Config:
         bayer = self.get("preprocess.bayer_pattern", "RGGB")
         if bayer not in ("RGGB", "BGGR", "GRBG", "GBRG"):
             raise ValueError(f"preprocess.bayer_pattern が不正です: {bayer!r}")
+
+        # ハイパスフィルタの枚数は実装側（SRM 30種）と一致している必要がある
+        num_filters = self.get("preprocess.num_highpass_filters", NUM_HIGHPASS_FILTERS)
+        if num_filters != NUM_HIGHPASS_FILTERS:
+            raise ValueError(
+                f"preprocess.num_highpass_filters は {NUM_HIGHPASS_FILTERS} のみ対応しています"
+                f"（指定値: {num_filters}）。枚数を変える場合は src/preprocess/highpass.py の"
+                "カーネル構成も合わせて変更すること"
+            )
+
+        optimizer = str(self.get("train.optimizer", "adam")).lower()
+        if optimizer != "adam":
+            raise ValueError(
+                f"train.optimizer は adam のみ対応しています（指定値: {optimizer!r}）。"
+                "論文既定値がAdamのため、他は実装していない"
+            )
 
     def __repr__(self) -> str:  # pragma: no cover - デバッグ用
         return f"Config(source_path={self.source_path})"

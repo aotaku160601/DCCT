@@ -4,11 +4,12 @@
 
     python -m src.cli init-db       --config configs/base.yaml
     python -m src.cli ingest        --config configs/base.yaml
+    python -m src.cli status        --config configs/base.yaml
     python -m src.cli train-stage1  --target photo --config configs/stage1_photo.yaml
     python -m src.cli train-stage1  --target ai    --config configs/stage1_ai.yaml
     python -m src.cli train-stage2  --config configs/stage2_classifier.yaml
-    python -m src.cli evaluate      --mode cross_generator --experiment-id <ID>
-    python -m src.cli report        --experiment-id <ID> --out reports/
+    python -m src.cli evaluate      --mode cross_generator --run-id <ID>
+    python -m src.cli report        --run-id <ID>
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from .data import db as db_module
 from .data import ingest as ingest_module
@@ -50,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="登録済みのOS管理ファイル（._xxx 等）の行を削除する（--dry-run と併用可）",
     )
 
+    p_status = sub.add_parser("status", help="取り込み状況と直近の実行をまとめて表示する")
+    p_status.add_argument("--config", default="configs/base.yaml")
+
     p_s1 = sub.add_parser("train-stage1", help="条件付き分布モデル pθ / qφ を学習する")
     p_s1.add_argument("--target", choices=["photo", "ai"], required=True)
     p_s1.add_argument("--config", required=True)
@@ -78,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--config", default="configs/base.yaml")
     p_report.add_argument("--run-id", type=int, help="対象の実行ID（省略時は最新の完了実行）")
     p_report.add_argument("--experiment-id", type=int, help="実験IDから実行IDを解決する")
-    p_report.add_argument("--out", default="reports/")
+    p_report.add_argument("--out", help="出力先（既定: configの paths.report_root）")
 
     return parser
 
@@ -129,6 +135,69 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         )
     if args.dry_run:
         print("\n（--dry-run のためDBへは書き込んでいません）")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    from .data.repository import MetadataRepository
+
+    config = Config.load(args.config)
+    with MetadataRepository(config.get("paths.db_path")) as repo:
+        dataset = repo.conn.execute("SELECT name, root_path FROM datasets LIMIT 1").fetchone()
+        summary = repo.image_summary()
+        empty_generators = [
+            row["name"]
+            for row in repo.conn.execute(
+                """
+                SELECT g.name FROM generators g
+                LEFT JOIN images i ON i.generator_id = g.generator_id
+                GROUP BY g.generator_id HAVING COUNT(i.image_id) = 0
+                ORDER BY g.name
+                """
+            )
+        ]
+        runs = repo.conn.execute(
+            """
+            SELECT r.run_id, e.stage, e.name, r.status, r.started_at
+            FROM training_runs r JOIN experiments e ON e.experiment_id = r.experiment_id
+            ORDER BY r.run_id DESC LIMIT 5
+            """
+        ).fetchall()
+
+    print(f"メタデータDB: {resolve(config.get('paths.db_path'))}")
+    if dataset is not None:
+        print(f"データセット: {dataset['name']}  ({dataset['root_path']})")
+
+    if not summary:
+        print("\n取り込み済みの画像はありません。`ingest` を実行してください。")
+    else:
+        print()
+        print(f"{'生成器':<26}{'split':>8}{'ラベル':>8}{'枚数':>12}{'破損':>9}{'64px未満':>10}")
+        totals = {"num_images": 0, "num_invalid": 0, "num_too_small": 0}
+        for row in summary:
+            print(
+                f"{row['generator']:<26}{row['split']:>8}{row['label']:>8}"
+                f"{row['num_images']:>12,}{row['num_invalid'] or 0:>9,}{row['num_too_small'] or 0:>10,}"
+            )
+            for key in totals:
+                totals[key] += row[key] or 0
+        print(f"{'合計':<26}{'':>8}{'':>8}{totals['num_images']:>12,}"
+              f"{totals['num_invalid']:>9,}{totals['num_too_small']:>10,}")
+
+    excluded = config.get("dataset.excluded_generators", [])
+    if excluded:
+        print(f"\n評価・学習から除外中: {', '.join(excluded)}")
+    if empty_generators:
+        print(f"画像が1枚も登録されていない生成器: {', '.join(empty_generators)}")
+
+    if runs:
+        print()
+        print(f"{'run_id':>7}  {'stage':<20}{'status':<12}{'開始':<20}実験名")
+        for row in runs:
+            print(
+                f"{row['run_id']:>7}  {row['stage']:<20}{row['status']:<12}"
+                f"{row['started_at']:<20}{row['name']}"
+            )
     return 0
 
 
@@ -258,18 +327,60 @@ def cmd_report(args: argparse.Namespace) -> int:
     with MetadataRepository(config.get("paths.db_path")) as repo:
         run_id = _resolve_run(repo, args.run_id, args.experiment_id)
 
-    path = build_report(config, run_id, args.out)
+    out_dir = args.out or config.get("paths.report_root", "reports")
+    path = build_report(config, run_id, out_dir)
     print(f"レポートを出力しました: {path}")
     return 0
 
 
+def _setup_logging(args: argparse.Namespace) -> Path | None:
+    """標準出力に加えて、configの `paths.log_root` 配下にも実行ログを残す。
+
+    取り込みや学習は数時間走ることがあるため、ターミナルを閉じた後でも
+    経過を追えるようにしておく。
+    """
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # 同一プロセスで複数回呼ばれてもハンドラが増えないようにする
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        handler.close()
+
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    log_root = "logs"
+    config_path = getattr(args, "config", None)
+    if config_path:
+        try:
+            log_root = Config.load(config_path).get("paths.log_root", "logs")
+        except Exception:  # configが読めない場合はログだけ既定の場所に出す
+            pass
+
+    try:
+        directory = resolve(log_root)
+        directory.mkdir(parents=True, exist_ok=True)
+        log_path = directory / f"{args.command}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+        return log_path
+    except OSError:
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv)
+    log_path = _setup_logging(args)
+    if log_path is not None:
+        logging.getLogger(__name__).info("ログファイル: %s", log_path)
 
     handlers = {
         "init-db": cmd_init_db,
         "ingest": cmd_ingest,
+        "status": cmd_status,
         "train-stage1": cmd_train_stage1,
         "train-stage2": cmd_train_stage2,
         "evaluate": cmd_evaluate,

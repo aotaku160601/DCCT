@@ -358,3 +358,17 @@ def test_directory_scan_can_skip_size_lookup(tmp_path):
     entry = next(DirectorySource(tmp_path / "gen", collect_size=False).iter_entries())
     assert entry.size_bytes == 0
     assert entry.relpath == "train/ai/img.png"
+
+
+def test_status_command_runs(config, capsys):
+    """status が取り込み結果を集計して表示できること。"""
+    from src.cli import main
+
+    ingest(config, progress=False)
+    assert main(["status", "--config", str(config.source_path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "SDv1.4" in out
+    assert "ImageNet(real)@SDv1.4" in out
+    assert "合計" in out
+    assert "Midjourney" in out            # 除外中の生成器として表示される

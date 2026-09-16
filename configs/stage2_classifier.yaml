@@ -10,9 +10,11 @@ data:
   split: train
 
 stage2:
-  # Frozen な pθ / qφ のチェックポイント（Stage I完了後に実パスを設定）
-  photo_model_checkpoint: null
-  ai_model_checkpoint: null
+  # Frozen な pθ / qφ のチェックポイント。
+  # configs/stage1_*.yaml の既定の保存先をそのまま指しているので、Stage I を既定設定で
+  # 走らせたならこのままで良い。別の場所に保存した場合だけ書き換える。
+  photo_model_checkpoint: "checkpoints/stage1_photo/best.pt"
+  ai_model_checkpoint: "checkpoints/stage1_ai/best.pt"
   # Ablation-A: 使用する条件付きモデルの切替
   use_photo_model: true
   use_ai_model: true

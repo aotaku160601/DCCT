@@ -60,3 +60,42 @@ def test_classifier_feature_source_is_mixture_params():
     """【OI-2】既定の分類器入力特徴は案A（混合分布パラメータ）であること。"""
     cfg = Config.load(PROJECT_ROOT / "configs" / "base.yaml")
     assert cfg.get("model.classifier.feature_source") == "mixture_params"
+
+
+def test_unsupported_optimizer_rejected(tmp_path):
+    """configにあるのに実装が無い、という乖離を検出できること。"""
+    (tmp_path / "opt.yaml").write_text(
+        "paths:\n  db_path: db/a.sqlite3\nproject:\n  seed: 1\ntrain:\n  optimizer: sgd\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="train.optimizer"):
+        Config.load(tmp_path / "opt.yaml")
+
+
+def test_highpass_filter_count_must_match_implementation(tmp_path):
+    (tmp_path / "m.yaml").write_text(
+        "paths:\n  db_path: db/a.sqlite3\nproject:\n  seed: 1\n"
+        "preprocess:\n  num_highpass_filters: 12\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="num_highpass_filters"):
+        Config.load(tmp_path / "m.yaml")
+
+
+def test_shipped_config_filter_count_matches_built_kernels():
+    """configのMと、実際に構成されるカーネル枚数が一致していること。"""
+    from src.preprocess.highpass import build_srm_kernels
+
+    kernels, _ = build_srm_kernels()
+    config = Config.load(PROJECT_ROOT / "configs" / "base.yaml")
+    assert config.get("preprocess.num_highpass_filters") == kernels.shape[0]
+
+
+def test_stage2_config_points_at_stage1_default_checkpoints():
+    """Stage IIのconfigが、Stage Iの既定の保存先をそのまま指していること。"""
+    stage2 = Config.load(PROJECT_ROOT / "configs" / "stage2_classifier.yaml")
+    photo = Config.load(PROJECT_ROOT / "configs" / "stage1_photo.yaml")
+    ai = Config.load(PROJECT_ROOT / "configs" / "stage1_ai.yaml")
+
+    assert stage2.get("stage2.photo_model_checkpoint") == f"{photo.get('train.checkpoint_dir')}/best.pt"
+    assert stage2.get("stage2.ai_model_checkpoint") == f"{ai.get('train.checkpoint_dir')}/best.pt"

@@ -75,7 +75,15 @@ class TrainerStage2(Trainer):
         else:
             from ..experiment.paths import resolve
 
-            state = torch.load(resolve(checkpoint), map_location=self.device, weights_only=False)
+            checkpoint_path = resolve(checkpoint)
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(
+                    f"Stage I（{which}）のチェックポイントが見つかりません: {checkpoint_path}\n"
+                    f"先に `python -m src.cli train-stage1 --target {which} "
+                    f"--config configs/stage1_{'photo' if which == 'photo' else 'ai'}.yaml` を実行するか、"
+                    f"configs/stage2_classifier.yaml の stage2.{which}_model_checkpoint を実際の保存先に直してください"
+                )
+            state = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             model.load_state_dict(state["modules"]["conditional_unet"])
             logger.info("%s モデルを読み込みました: %s", which, checkpoint)
 

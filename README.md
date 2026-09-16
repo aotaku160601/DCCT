@@ -3,13 +3,22 @@
 Zhong, Xu, Zou. *Color Matters: Demosaicing-Guided Color Correlation Training for Generalizable
 AI-Generated Image Detection* (arXiv:2601.22778, 2026) のスタンドアロン再現実装。
 
-設計資料（プロジェクト内資料）:
+## 設計資料
 
-- `01_要件定義書_DCCT再現実装.md`
-- `02_基本設計書_DCCT再現実装.md`
-- `03_詳細設計書_DCCT再現実装.md`
-- `04_DB設計書_DCCT再現実装.md`
-- `05_図表集_DCCT再現実装.md`
+実装の根拠となる設計資料は `docs/` に置いてある（GitHub上でそのまま閲覧でき、
+Mermaid図もレンダリングされる）。
+
+| 資料 | 内容 |
+|---|---|
+| [01_要件定義書](docs/01_要件定義書_DCCT再現実装.md) | 研究目的、スコープ、機能要件FR-1〜10、非機能要件NFR-1〜7、受け入れ基準、Open Issues |
+| [02_基本設計書](docs/02_基本設計書_DCCT再現実装.md) | システム構成図、モジュール構成、ディレクトリ構成、CLIコマンド遷移 |
+| [03_詳細設計書](docs/03_詳細設計書_DCCT再現実装.md) | Algorithm 1/2の処理フロー、クラス設計、入出力仕様、アブレーション方針 |
+| [04_DB設計書](docs/04_DB設計書_DCCT再現実装.md) | ER図、テーブル定義、DDL、インデックス、典型クエリ |
+| [05_図表集](docs/05_図表集_DCCT再現実装.md) | シーケンス図・フローチャート（他4資料の図を集約） |
+
+設計資料の記述と実装が食い違っている箇所（y'のチャンネル数など）は、本READMEの
+「[設計上の決定事項](#設計上の決定事項open-issues-への回答)」に判断と根拠をまとめている。
+資料側は当時の草稿のまま残してある。
 
 ## はじめての実行手順（macOS）
 
@@ -44,7 +53,7 @@ cd ~/DCCT
 python3 -m venv .venv
 source .venv/bin/activate      # 以降ターミナルを開くたびに必要
 pip install -r requirements.txt
-python -m pytest               # 111件パスすれば環境は正常
+python -m pytest               # すべてパスすれば環境は正常
 ```
 
 `source .venv/bin/activate` を実行するとプロンプトの先頭に `(.venv)` が付く。
@@ -84,11 +93,15 @@ python -m src.cli ingest --config configs/base.yaml --generator SDv1.4 --limit 1
 `走査 0` や `パスが見つかりません` が出た場合は、`dataset.sources` のファイル名と
 実際のファイル名が食い違っているので、`ls` の結果に合わせて `configs/base.yaml` を直す。
 
-問題なければ本実行する（数分〜数十分かかる）。
+問題なければ本実行する（生成器ごとに数分〜数十分かかる）。
 
 ```bash
 python -m src.cli ingest --config configs/base.yaml
+python -m src.cli status --config configs/base.yaml     # 何枚入ったか確認
 ```
+
+生成器ごとに33万枚前後・破損ほぼ0なら正常。フォルダ形式の生成器が極端に遅い場合は
+`--no-probe` を付ける（README「[ディレクトリ走査が遅いとき](#ディレクトリ走査が遅いとき)」参照）。
 
 ### 5. 学習する
 
@@ -108,9 +121,9 @@ python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml
 python -m src.cli train-stage1 --target ai    --config configs/stage1_ai.yaml      # qφ
 ```
 
-両方終わったら、`configs/stage2_classifier.yaml` の `stage2.photo_model_checkpoint` と
-`ai_model_checkpoint` に、それぞれ `checkpoints/stage1_photo/best.pt` /
-`checkpoints/stage1_ai/best.pt` を書いてから分類器を学習する。
+両方終わったら分類器を学習する。`configs/stage2_classifier.yaml` は Stage I の既定の
+保存先（`checkpoints/stage1_photo/best.pt` / `checkpoints/stage1_ai/best.pt`）を
+最初から指しているので、既定設定で学習したなら編集は不要。
 
 ```bash
 python -m src.cli train-stage2 --config configs/stage2_classifier.yaml
@@ -124,7 +137,7 @@ python -m src.cli train-stage2 --config configs/stage2_classifier.yaml
 ```bash
 python -m src.cli evaluate --mode cross_generator --config configs/stage2_classifier.yaml
 python -m src.cli evaluate --mode robustness      --config configs/stage2_classifier.yaml
-python -m src.cli report --out reports/
+python -m src.cli report
 ```
 
 `reports/run<番号>/report.md` に表とグラフがまとまる。
@@ -142,24 +155,14 @@ python -m src.cli report --out reports/
 
 ## セットアップ（詳細）
 
-macOS / Linux:
-
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Windows (PowerShell):
-
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-`python` が「Python」とだけ表示して何も起きない場合は、Microsoft Store のスタブが
-呼ばれている。`py -3` を使うか、python.org 版をインストールして PATH に通すこと。
+Windows で試す場合は `py -3 -m venv .venv` → `.\.venv\Scripts\Activate.ps1`
+（`python` が「Python」とだけ表示する場合は Microsoft Store のスタブが呼ばれている）。
 
 CPUのみで動かす場合は、CPU版wheelを先に入れてから残りを入れる:
 
@@ -206,6 +209,7 @@ MPS未対応演算をCPUへ自動フォールバックさせる。
 │   ├── experiment/           # config読み込み・実験ID発行・ログ管理
 │   ├── report/               # 結果集計・レポート出力
 │   └── cli.py                # CLIエントリポイント
+├── docs/                     # 設計資料（要件定義〜図表集）
 ├── migrations/               # DBマイグレーションSQL
 ├── db/                       # メタデータDB（SQLite、gitignore対象）
 ├── checkpoints/              # 学習チェックポイント
@@ -214,15 +218,34 @@ MPS未対応演算をCPUへ自動フォールバックさせる。
 
 ## CLIコマンド
 
-| コマンド | 内容 |
-|---|---|
-| `python -m src.cli init-db --config configs/base.yaml` | メタデータDBを作成 |
-| `python -m src.cli ingest --config configs/base.yaml` | 外部SSD上のGenImageを走査しDBへ登録 |
-| `python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml` | pθを学習 |
-| `python -m src.cli train-stage1 --target ai --config configs/stage1_ai.yaml` | qφを学習 |
-| `python -m src.cli train-stage2 --config configs/stage2_classifier.yaml` | 分類器gψを学習 |
-| `python -m src.cli evaluate --mode cross_generator --experiment-id <ID>` | Table1相当の評価 |
-| `python -m src.cli report --experiment-id <ID> --out reports/` | レポート出力 |
+| コマンド | 内容 | 主なオプション |
+|---|---|---|
+| `init-db` | メタデータDBを作成 | `--force`（作り直し） |
+| `ingest` | 外部SSD上のGenImageを走査しDBへ登録 | `--generator` `--limit` `--dry-run` `--no-probe` `--cleanup` |
+| `status` | 取り込み状況と直近の実行を表示 | |
+| `train-stage1` | pθ / qφ を学習 | `--target photo\|ai` `--epochs` `--max-steps` `--resume` |
+| `train-stage2` | 分類器gψを学習 | `--epochs` `--max-steps` `--resume` |
+| `evaluate` | 評価を実行 | `--mode cross_generator\|ablation\|robustness` `--run-id` `--split` |
+| `report` | 結果レポートを出力 | `--run-id` `--out` |
+
+いずれも `python -m src.cli <コマンド> --config <configファイル>` の形で実行する。
+実行ログは標準出力に加えて `logs/<コマンド名>_<日時>.log` にも残るので、
+数時間かかる取り込みや学習をターミナルを閉じた後から追える。
+
+取り込みが済んだかどうか、どの生成器が何枚入ったかは `status` で確認できる。
+
+```bash
+python -m src.cli status --config configs/base.yaml
+```
+
+```
+生成器                          split     ラベル          枚数       破損    64px未満
+SDv1.4                       train      ai     159,000        0       100
+ImageNet(real)@SDv1.4        train    real     159,000        0        98
+...
+評価・学習から除外中: Midjourney
+画像が1枚も登録されていない生成器: Midjourney
+```
 
 ## メタデータDB
 
@@ -588,3 +611,5 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 - [x] Step 4: CFAマスク → ハイパスフィルタ → 条件付きモデル(pθ/qφ) → 分類器gψ
 - [x] Step 5: 学習ループ（Stage I-A/I-B, Stage II）とDataLoader
 - [x] Step 6: 評価（cross-generator / ablation / robustness）とレポート出力
+- [ ] Step 7: 実データ（GenImage全量）での取り込み完了と学習時間の実測
+- [ ] Step 8: 論文値との比較（Table 1 / Table 4 / Figure 6 の再現度確認）
