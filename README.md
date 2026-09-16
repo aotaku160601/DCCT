@@ -53,11 +53,16 @@ cd ~/DCCT
 python3 -m venv .venv
 source .venv/bin/activate      # 以降ターミナルを開くたびに必要
 pip install -r requirements.txt
+pip install -e .               # dcct コマンドを使えるようにする
 python -m pytest               # すべてパスすれば環境は正常
 ```
 
 `source .venv/bin/activate` を実行するとプロンプトの先頭に `(.venv)` が付く。
 これが付いていない状態でコマンドを打つと「モジュールが無い」と言われる。
+
+`pip install -e .` を入れると、以降は **`dcct <コマンド>`** の形で実行できる
+（02_基本設計書 6節のコマンド形式）。入れない場合は `python -m src.cli <コマンド>`
+と書く。以下では短い `dcct` の方で記載する。
 
 ### 2. 外部SSDのパスを確認して設定する
 
@@ -76,7 +81,7 @@ macOSが外部ボリュームへのアクセス許可を求めてきた場合は
 ### 3. データベースを作る
 
 ```bash
-python -m src.cli init-db --config configs/base.yaml
+dcct init-db --config configs/base.yaml
 ```
 
 `db/dcct_metadata.sqlite3` が作られ、テーブル10個が表示されれば成功。
@@ -86,7 +91,7 @@ python -m src.cli init-db --config configs/base.yaml
 まず1000枚だけ、DBに書かずに試す。
 
 ```bash
-python -m src.cli ingest --config configs/base.yaml --generator SDv1.4 --limit 1000 --dry-run
+dcct ingest --config configs/base.yaml --generator SDv1.4 --limit 1000 --dry-run
 ```
 
 `走査 1000 / split=train,val` のように出れば構成判定が合っている。
@@ -96,8 +101,8 @@ python -m src.cli ingest --config configs/base.yaml --generator SDv1.4 --limit 1
 問題なければ本実行する（生成器ごとに数分〜数十分かかる）。
 
 ```bash
-python -m src.cli ingest --config configs/base.yaml
-python -m src.cli status --config configs/base.yaml     # 何枚入ったか確認
+dcct ingest --config configs/base.yaml
+dcct status --config configs/base.yaml     # 何枚入ったか確認
 ```
 
 生成器ごとに33万枚前後・破損ほぼ0なら正常。フォルダ形式の生成器が極端に遅い場合は
@@ -108,7 +113,7 @@ python -m src.cli status --config configs/base.yaml     # 何枚入ったか確�
 いきなり全量を回さず、まず数ステップだけ流して1ステップの所要時間を測る。
 
 ```bash
-python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml --epochs 1 --max-steps 20
+dcct train-stage1 --target photo --config configs/stage1_photo.yaml --epochs 1 --max-steps 20
 ```
 
 ログの `epoch_seconds` から1エポックの所要時間を見積もり、長すぎる場合は
@@ -117,8 +122,8 @@ python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml
 見積りがついたら本番の学習に進む。pθ と qφ は独立なのでターミナルを2つ開いて並列に流してもよい。
 
 ```bash
-python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml   # pθ
-python -m src.cli train-stage1 --target ai    --config configs/stage1_ai.yaml      # qφ
+dcct train-stage1 --target photo --config configs/stage1_photo.yaml   # pθ
+dcct train-stage1 --target ai    --config configs/stage1_ai.yaml      # qφ
 ```
 
 両方終わったら分類器を学習する。`configs/stage2_classifier.yaml` は Stage I の既定の
@@ -126,7 +131,7 @@ python -m src.cli train-stage1 --target ai    --config configs/stage1_ai.yaml   
 最初から指しているので、既定設定で学習したなら編集は不要。
 
 ```bash
-python -m src.cli train-stage2 --config configs/stage2_classifier.yaml
+dcct train-stage2 --config configs/stage2_classifier.yaml
 ```
 
 学習が途中で止まった場合は `--resume checkpoints/stage1_photo/best.pt` のように
@@ -135,9 +140,9 @@ python -m src.cli train-stage2 --config configs/stage2_classifier.yaml
 ### 6. 評価してレポートを出す
 
 ```bash
-python -m src.cli evaluate --mode cross_generator --config configs/stage2_classifier.yaml
-python -m src.cli evaluate --mode robustness      --config configs/stage2_classifier.yaml
-python -m src.cli report
+dcct evaluate --mode cross_generator --config configs/stage2_classifier.yaml
+dcct evaluate --mode robustness      --config configs/stage2_classifier.yaml
+dcct report
 ```
 
 `reports/run<番号>/report.md` に表とグラフがまとまる。
@@ -146,6 +151,8 @@ python -m src.cli report
 
 | 症状 | 確認すること |
 |---|---|
+| `No module named src.xxx` | サブコマンドは `src.cli` の下にある。`dcct <コマンド>` か `python -m src.cli <コマンド>` と書く |
+| `command not found: dcct` | `pip install -e .` を実行したか。していなければ `python -m src.cli` を使う |
 | `command not found: python` | `source .venv/bin/activate` を実行したか（`(.venv)` が出ているか） |
 | `ModuleNotFoundError` | 同上。または `pip install -r requirements.txt` が完了しているか |
 | `パスが見つかりません` | `ls /Volumes` のマウント名と `paths.dataset_root` が一致しているか |
@@ -228,14 +235,16 @@ MPS未対応演算をCPUへ自動フォールバックさせる。
 | `evaluate` | 評価を実行 | `--mode cross_generator\|ablation\|robustness` `--run-id` `--split` |
 | `report` | 結果レポートを出力 | `--run-id` `--out` |
 
-いずれも `python -m src.cli <コマンド> --config <configファイル>` の形で実行する。
+いずれも `dcct <コマンド> --config <configファイル>` の形で実行する
+（`pip install -e .` をしていない場合は `python -m src.cli <コマンド> ...`）。
+サブコマンド名を間違えると `No module named ...` ではなく、使えるコマンドの一覧が出る。
 実行ログは標準出力に加えて `logs/<コマンド名>_<日時>.log` にも残るので、
 数時間かかる取り込みや学習をターミナルを閉じた後から追える。
 
 取り込みが済んだかどうか、どの生成器が何枚入ったかは `status` で確認できる。
 
 ```bash
-python -m src.cli status --config configs/base.yaml
+dcct status --config configs/base.yaml
 ```
 
 ```
@@ -478,8 +487,8 @@ Transformer Encoder に通し、出力を平均プーリングしてから全結
 ## 学習
 
 ```bash
-python -m src.cli train-stage1 --target photo --config configs/stage1_photo.yaml   # pθ
-python -m src.cli train-stage1 --target ai    --config configs/stage1_ai.yaml      # qφ
+dcct train-stage1 --target photo --config configs/stage1_photo.yaml   # pθ
+dcct train-stage1 --target ai    --config configs/stage1_ai.yaml      # qφ
 python -m src.cli train-stage2 --config configs/stage2_classifier.yaml             # gψ
 
 # スモークテスト（1エポック・2ステップだけ流す）
