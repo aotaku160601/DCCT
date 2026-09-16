@@ -339,18 +339,43 @@ python -m src.cli ingest --config configs/base.yaml --cleanup --dry-run   # 件�
 python -m src.cli ingest --config configs/base.yaml --cleanup             # 削除
 ```
 
-### ディレクトリ走査が遅いとき
+### 走査速度とヘッダ読み取りの既定
 
-ZIPは中央ディレクトリをまとめて読むので速いが、展開済みフォルダは1ファイルずつ
-開くため、外部SSD（特にexFAT）では大幅に遅くなることがある。`--no-probe` を付けると
-画像ヘッダを読まずにパスとサイズだけで登録する。
+ZIPとフォルダで最適な設定が異なるため、**画像ヘッダを読むかどうかはソース種別ごとに
+既定を変えている**。
+
+| ソース種別 | ヘッダ読み取り | 実測 |
+|---|---|---|
+| ZIP | 読む（既定） | 1,200〜3,000 img/s |
+| ディレクトリ | 読まない（既定） | 数万 img/s（読むと 54 img/s → 0.4 img/s まで低下） |
+
+ZIPは中央ディレクトリを一括で読むため1枚あたりのコストが小さい。一方、exFATの
+外部SSD上にある30万件規模のフラットなディレクトリでは、1ファイルずつ `stat` すると
+ディレクトリの後ろへ行くほど1件あたりが遅くなり（全体では O(n²)）、現実的な時間で
+終わらない。実測では、あるフォルダ形式の生成器が 54 img/s で始まり、15万件を過ぎた
+あたりで 1枚2.49秒まで落ちた。
+
+ヘッダを読まない場合、`width` / `height` は NULL になり、破損判定と64px未満の判定は
+行われない（読めない画像に当たったときは学習・評価時にスキップされる）。
+
+既定を上書きしたい場合:
 
 ```bash
-python -m src.cli ingest --config configs/base.yaml --generator GLIDE --no-probe
+# すべてのソースで読む（ディレクトリ形式では非常に遅くなる）
+python -m src.cli ingest --config configs/base.yaml --probe
+
+# すべてのソースで読まない
+python -m src.cli ingest --config configs/base.yaml --no-probe
 ```
 
-この場合 width/height は NULL になり、破損判定と64px未満の判定は行われない
-（読めない画像に当たったときは学習・評価時にスキップされる）。
+特定のソースだけ変えたい場合は `configs/base.yaml` の `dataset.sources` に
+`probe: true` / `probe: false` を書く。
+
+なお**学習・評価の読み出しも同じ制約を受ける**。論文のプロトコルでは学習はSDv1.4
+（ZIP）のみなので学習側は影響を受けにくいが、フォルダ形式の生成器のtest splitを
+評価する際は読み出しがボトルネックになる。macOSのSpotlightが外部ボリュームを
+索引していると更に遅くなるため、必要なら `sudo mdutil -i off "/Volumes/Extreme Pro"`
+で無効化する。
 
 ### 取得するメタデータ
 
@@ -563,14 +588,20 @@ AccuracyもAUCも意味を持たなくなる）。`dataset.excluded_generators` 
 
 ## 設計上の決定事項（Open Issues への回答）
 
-### OI-1: Midjourneyデータ未取得
+### OI-1: Midjourneyデータ（取得しない方針で確定）
 
-Midjourney生成画像は現時点で未取得のため、**当面すべての学習・評価対象から除外する**。
-ただしコード・DBスキーマは8生成器を前提のまま構築し、除外は
-`configs/base.yaml` の `dataset.excluded_generators` で制御する。
-`generators` テーブルには `notes` 付きでレコードのみ登録しておき、データ取得後は
-`excluded_generators` を空にするだけで8生成器のTable 1再現に復帰できる。
-当面の cross-generator 評価は **7生成器平均**として報告する。
+Midjourney生成画像は**取得しない方針で確定**した。したがって cross-generator 評価は
+**7生成器（SDv1.4 / SDv1.5 / ADM / GLIDE / Wukong / VQDM / BigGAN）平均**として報告する。
+
+論文Table 1の「8生成器平均 ≈ 97%」とは母集団が異なるため、数値を直接並べるのではなく、
+**生成器ごとの値と7生成器平均を併記し、論文と同傾向（未知生成器でも精度が落ちにくい）
+であるかを確認する**という形で整合性を検証する。01_要件定義書 9節の受け入れ基準
+「8生成器平均Accuracyが論文報告値に近似」も、この7生成器平均に読み替える。
+
+コードとDBスキーマは8生成器を前提のまま残してあり、`generators` テーブルにも
+Midjourneyのレコードだけは `notes` 付きで登録される。後日入手した場合は
+`dataset.sources` の `path` を設定し、`dataset.excluded_generators` から外すだけで
+8生成器の再現に復帰できる。
 
 ### OI-2: 分類器 gψ への入力特徴（03_詳細設計書 1.3節）
 

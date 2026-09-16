@@ -43,10 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--limit", type=int, help="1生成器あたりの走査枚数上限（スモークテスト用）")
     p_ingest.add_argument("--dry-run", action="store_true", help="DBへ書き込まずに走査結果だけ表示する")
     p_ingest.add_argument("--no-progress", action="store_true", help="進捗バーを表示しない")
-    p_ingest.add_argument(
+    probe_group = p_ingest.add_mutually_exclusive_group()
+    probe_group.add_argument(
         "--no-probe", action="store_true",
-        help="画像ヘッダを読まずにパスとサイズだけ登録する（ディレクトリ走査が遅い環境向け。"
-             "width/heightと破損判定は行われない）",
+        help="すべてのソースで画像ヘッダを読まない（width/heightと破損判定を行わない）。"
+             "既定ではZIPのみ読み、ディレクトリは読まない",
+    )
+    probe_group.add_argument(
+        "--probe", action="store_true",
+        help="すべてのソースで画像ヘッダを読む（ディレクトリ形式では非常に遅くなることがある）",
     )
     p_ingest.add_argument(
         "--cleanup", action="store_true",
@@ -122,7 +127,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         limit=args.limit,
         dry_run=args.dry_run,
         progress=not args.no_progress,
-        probe_header=not args.no_probe,
+        probe_header=True if args.probe else (False if args.no_probe else None),
     )
 
     print()

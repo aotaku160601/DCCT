@@ -372,3 +372,51 @@ def test_status_command_runs(config, capsys):
     assert "ImageNet(real)@SDv1.4" in out
     assert "合計" in out
     assert "Midjourney" in out            # 除外中の生成器として表示される
+
+
+def test_probe_default_depends_on_source_type(config):
+    """ZIPはヘッダを読み、ディレクトリは読まない（既定）。
+
+    exFATの外部SSDでは巨大ディレクトリの1ファイルずつのstatが極端に遅くなるため、
+    ディレクトリ形式では既定でヘッダ読み取りを行わない。
+    """
+    ingest(config, progress=False)
+
+    with MetadataRepository(config.get("paths.db_path")) as repo:
+        zip_row = repo.conn.execute(
+            "SELECT width, height FROM images WHERE filepath LIKE '%.zip!%' LIMIT 1"
+        ).fetchone()
+        dir_row = repo.conn.execute(
+            "SELECT width, height FROM images WHERE filepath NOT LIKE '%.zip!%' LIMIT 1"
+        ).fetchone()
+
+    assert zip_row["width"] == 128 and zip_row["height"] == 128   # ZIP: 読む
+    assert dir_row["width"] is None and dir_row["height"] is None  # ディレクトリ: 読まない
+
+
+def test_probe_can_be_forced_for_all_sources(config):
+    """--probe 相当でディレクトリ側もヘッダを読むこと。"""
+    ingest(config, progress=False, probe_header=True)
+
+    with MetadataRepository(config.get("paths.db_path")) as repo:
+        dir_row = repo.conn.execute(
+            "SELECT width, height FROM images WHERE filepath NOT LIKE '%.zip!%' LIMIT 1"
+        ).fetchone()
+    assert dir_row["width"] == 128
+
+
+def test_per_source_probe_setting_overrides_default(config, tmp_path):
+    """ソースごとに probe を指定できること。"""
+    data = config.as_dict()
+    for source in data["dataset"]["sources"]:
+        if source["name"] == "BigGAN":
+            source["probe"] = True
+    path = tmp_path / "per_source_probe.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    ingest(Config.load(path), progress=False)
+    with MetadataRepository(config.get("paths.db_path")) as repo:
+        dir_row = repo.conn.execute(
+            "SELECT width FROM images WHERE filepath NOT LIKE '%.zip!%' LIMIT 1"
+        ).fetchone()
+    assert dir_row["width"] == 128

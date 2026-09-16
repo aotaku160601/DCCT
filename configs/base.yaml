@@ -49,7 +49,10 @@ dataset:
 
   # ---- ingest（データ取り込み）設定 ----
   # dataset_root からの相対パス。ZIPでもディレクトリでも同じインタフェースで走査する。
-  # type: auto（拡張子から判定） | zip | dir
+  # type:  auto（拡張子から判定） | zip | dir
+  # probe: 画像ヘッダを読んで width/height と破損を判定するか。省略時はZIPのみ有効。
+  #        exFATの外部SSDでは、巨大なディレクトリを1ファイルずつ stat すると
+  #        後ろへ行くほど遅くなるため、ディレクトリ形式では既定で無効にしている
   sources:
     - { name: SDv1.4, path: "genimage-stable-diffusion-v1-4.zip", category: diffusion, type: auto }
     - { name: SDv1.5, path: "stable_diffusion_v_1_5",             category: diffusion, type: auto }
@@ -58,7 +61,8 @@ dataset:
     - { name: GLIDE,  path: "imagenet_glide",                     category: diffusion, type: auto }
     - { name: VQDM,   path: "VQDM",                               category: diffusion, type: auto }
     - { name: BigGAN, path: "BigGAN",                             category: gan,       type: auto }
-    # 【OI-1】未取得。path は判明後に設定する（excluded_generators に入っている間は走査しない）
+    # 【OI-1】取得しない方針。generatorsマスタには残すが走査・評価の対象外
+    #（後日入手した場合は path を設定し、excluded_generators から外すだけでよい）
     - { name: Midjourney, path: "",                               category: diffusion, type: auto }
 
   # nature/（実写ImageNet画像）をどの generator に紐づけるか

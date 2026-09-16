@@ -185,12 +185,24 @@ def ingest(
     limit: int | None = None,
     dry_run: bool = False,
     progress: bool = True,
-    probe_header: bool = True,
+    probe_header: bool | None = None,
 ) -> list[IngestStats]:
     """configに従って外部SSD上のGenImageを走査し、DBへ登録する。
 
     生成器（ソース）単位でトランザクションを分けるため、途中で失敗しても
     成功済みの生成器はDBに残り、失敗した生成器のみ再実行できる（03_詳細設計書 6節）。
+
+    `probe_header` は画像ヘッダを読んで width/height と破損を判定するかどうか。
+    `None`（既定）ではソース種別ごとに決める:
+
+    - ZIP: 有効。中央ディレクトリを一括で読むため1枚あたりのコストが小さい
+      （実測 1,200〜3,000 img/s）
+    - ディレクトリ: 無効。exFATの外部SSDでは、30万件規模のディレクトリに対して
+      1ファイルずつ stat すると後ろへ行くほど遅くなり（実測で 54 img/s → 0.4 img/s）
+      現実的な時間で終わらない。ディレクトリを読むだけなら数万 img/s 出る
+
+    ソースごとに `probe: true/false` を書けば個別に上書きでき、CLIの
+    `--probe` / `--no-probe` はすべてのソースに対して強制する。
     """
     dataset_root = Path(config.get("paths.dataset_root")).expanduser()
     dataset_name = config.get("dataset.name", "GenImage")
@@ -252,11 +264,21 @@ def ingest(
                 notes=None if real_naming == "shared" else f"{name} サブセットの実写画像（nature/）",
             )
 
-            logger.info("走査開始: %s -> %s", name, source_path)
-            # --no-probe のときはファイルごとの stat も省く（ディレクトリ走査の主コスト）
-            with open_source(
-                source_path, spec.get("type", "auto"), collect_size=probe_header
-            ) as source:
+            source_type = spec.get("type", "auto")
+            is_zip = source_type == "zip" or (
+                source_type == "auto" and source_path.suffix.lower() == ".zip"
+            )
+            # 明示指定 > ソース個別の設定 > 種別ごとの既定
+            probe = probe_header if probe_header is not None else bool(spec.get("probe", is_zip))
+
+            logger.info(
+                "走査開始: %s -> %s（画像ヘッダの読み取り: %s）",
+                name,
+                source_path,
+                "あり" if probe else "なし",
+            )
+            # probe しないときはファイルごとの stat も省く（ディレクトリ走査の主コスト）
+            with open_source(source_path, source_type, collect_size=probe) as source:
                 rows = _iter_rows(
                     source,
                     dataset_id=dataset_id,
@@ -268,7 +290,7 @@ def ingest(
                     source_val_as=source_val_as,
                     patch_size=patch_size,
                     limit=limit,
-                    probe_header=probe_header,
+                    probe_header=probe,
                     stats=stats,
                 )
                 if progress:
