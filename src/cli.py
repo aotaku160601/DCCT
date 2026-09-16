@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -343,6 +344,10 @@ def _setup_logging(args: argparse.Namespace) -> Path | None:
 
     取り込みや学習は数時間走ることがあるため、ターミナルを閉じた後でも
     経過を追えるようにしておく。
+
+    ファイル名にはプロセスIDを含める。pθとqφを並列に流すと2つのプロセスが同じ秒に
+    起動することがあり、秒までのタイムスタンプだけでは同じファイルへ両方が
+    書き込んでしまうため。
     """
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     root = logging.getLogger()
@@ -367,7 +372,7 @@ def _setup_logging(args: argparse.Namespace) -> Path | None:
     try:
         directory = resolve(log_root)
         directory.mkdir(parents=True, exist_ok=True)
-        log_path = directory / f"{args.command}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        log_path = directory / f"{args.command}_{datetime.now():%Y%m%d_%H%M%S}_{os.getpid()}.log"
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
