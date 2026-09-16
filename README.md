@@ -147,6 +147,32 @@ dcct train-stage2 --config configs/stage2_classifier.yaml
 学習が途中で止まった場合は `--resume checkpoints/stage1_photo/best.pt` のように
 チェックポイントを指定すれば続きから再開できる。
 
+#### ターミナルを閉じても止まらないようにする
+
+学習は数時間かかるので、`nohup` でターミナルから切り離し、`caffeinate` でMacのスリープを
+抑止して流すとよい。`&` を付けるとすぐプロンプトが戻る。
+
+```bash
+nohup caffeinate -i dcct train-stage1 --target photo --config configs/stage1_photo.yaml &
+nohup caffeinate -i dcct train-stage1 --target ai    --config configs/stage1_ai.yaml &
+```
+
+経過は `logs/` の中の最新ファイルで追える（`nohup.out` ではなくこちらを見る）。
+
+```bash
+tail -f "$(ls -t logs/train-stage1_*.log | head -1)"      # Ctrl-C で監視だけやめる
+```
+
+実行中かどうかは `ps` で確認でき、止めたいときは `kill` する。
+
+```bash
+ps aux | grep "[t]rain-stage1"
+kill <プロセスID>
+```
+
+万一プロセスが落ちても、直近のエポックのチェックポイントは `checkpoints/` に残っているので
+`--resume` で続きから再開できる。
+
 ### 6. 評価してレポートを出す
 
 ```bash
