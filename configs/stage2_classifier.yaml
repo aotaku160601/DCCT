@@ -25,6 +25,9 @@ train:
   num_epochs: 20
   checkpoint_dir: checkpoints/stage2_classifier
   save_every_epoch: 1
+  # 直近いくつのエポックのチェックポイントを残すか（best.pt は常に残る）。
+  # 全エポック残すとディスクを圧迫するため既定は3個。0で無制限
+  keep_last_checkpoints: 3
   resume_from: null
 
   # Stage I と同じ考え方で1エポックを区切る。Stage IIは条件付きモデル2本を通すぶん

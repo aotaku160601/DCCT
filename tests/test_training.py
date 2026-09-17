@@ -353,3 +353,48 @@ def test_connection_sets_busy_timeout(tmp_path):
     timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     conn.close()
     assert timeout >= 30_000
+
+
+def test_old_checkpoints_are_pruned(project):
+    """古いエポックのチェックポイントが整理され、best.pt は残ること。
+
+    全エポック分を残すとディスクを圧迫し、実機では学習中にディスクが埋まって
+    torch.save が失敗した。
+    """
+    tmp_path, data = project
+    config = _write_config(
+        tmp_path, data, "s1_prune.yaml",
+        train={**data["train"], "checkpoint_dir": str(tmp_path / "ckpt_prune"),
+               "keep_last_checkpoints": 2},
+    )
+
+    with TrainerStage1(config, "photo") as trainer:
+        trainer.fit(num_epochs=5, max_steps_per_epoch=1)
+
+    directory = tmp_path / "ckpt_prune"
+    epoch_files = sorted(p.name for p in directory.glob("run*_epoch*.pt"))
+    assert len(epoch_files) == 2                  # 直近2エポックのみ
+    assert epoch_files == sorted(epoch_files)[-2:]
+    assert (directory / "best.pt").exists()       # best.pt は常に残る
+    assert not list(directory.glob("*.tmp"))      # 一時ファイルが残らない
+
+
+def test_checkpoint_save_failure_does_not_kill_training(project, monkeypatch):
+    """保存に失敗しても（ディスク不足など）学習は継続すること。"""
+    tmp_path, data = project
+    config = _write_config(tmp_path, data, "s1_savefail.yaml",
+                           train={**data["train"], "checkpoint_dir": str(tmp_path / "ckpt_savefail")})
+
+    with TrainerStage1(config, "photo") as trainer:
+        def no_space(*args, **kwargs):
+            raise RuntimeError("[enforce fail at inline_container.cc:672] unexpected pos")
+
+        monkeypatch.setattr(torch, "save", no_space)
+        run_id = trainer.fit(num_epochs=2, max_steps_per_epoch=1)
+        status = trainer.repo.conn.execute(
+            "SELECT status FROM training_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()["status"]
+
+    assert status == "completed"
+    # 書きかけの一時ファイルは残さない
+    assert not list((tmp_path / "ckpt_savefail").glob("*.tmp"))

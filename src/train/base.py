@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -23,6 +25,9 @@ from ..experiment.paths import resolve
 from ..experiment.tracker import git_commit, set_seed
 
 logger = logging.getLogger(__name__)
+
+# 学習開始時にこれを下回っていたら警告する空き容量（チェックポイント1個が約22MB）
+_MIN_FREE_BYTES = 2 * 1024**3
 
 
 class Trainer(ABC):
@@ -55,6 +60,9 @@ class Trainer(ABC):
 
         self.checkpoint_dir = resolve(config.get("train.checkpoint_dir", f"checkpoints/{self.stage}"))
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # 古いエポックのチェックポイントを何個残すか（best.pt は常に残す）
+        self.keep_last_checkpoints = int(config.get("train.keep_last_checkpoints", 3))
+        self._check_free_space()
 
         self.start_epoch = 0
         self.global_step = 0
@@ -68,6 +76,24 @@ class Trainer(ABC):
             device_summary(self.device),
         )
         self.setup()
+
+    def _check_free_space(self) -> None:
+        """空き容量が少なければ警告する。
+
+        実機で、学習の途中にディスクが埋まり torch.save が書き込み中に失敗して
+        プロセスごと落ちたことがあるため、開始前に気づけるようにしておく。
+        """
+        try:
+            free = shutil.disk_usage(self.checkpoint_dir).free
+        except OSError:
+            return
+        if free < _MIN_FREE_BYTES:
+            logger.warning(
+                "チェックポイント保存先の空き容量が少なくなっています: %.1f GB（%s）。"
+                "学習中にディスクが埋まると保存に失敗します",
+                free / 1024**3,
+                self.checkpoint_dir,
+            )
 
     # ------------------------------------------------------------------
     # サブクラスが実装する部分
@@ -208,9 +234,30 @@ class Trainer(ABC):
     ) -> Path:
         filename = filename or f"run{self.run_id}_epoch{epoch:03d}.pt"
         path = self.checkpoint_dir / filename
-        # まずファイルを確実に残す。DBへの登録が失敗しても学習結果は失われない
-        torch.save(self.checkpoint_state(epoch, metrics), path)
+
+        # 一時ファイルへ書いてから置き換える。途中で失敗しても既存の
+        # チェックポイント（特に best.pt）を壊さないため
+        temporary = path.with_suffix(".pt.tmp")
+        try:
+            torch.save(self.checkpoint_state(epoch, metrics), temporary)
+            os.replace(temporary, path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            free = ""
+            try:
+                free = f"（空き容量: {shutil.disk_usage(self.checkpoint_dir).free / 1024**3:.1f} GB）"
+            except OSError:
+                pass
+            logger.exception(
+                "チェックポイントの保存に失敗しました: %s%s。"
+                "ディスクの空き容量を確認してください。学習は継続します",
+                path,
+                free,
+            )
+            return path
+
         logger.info("チェックポイントを保存しました: %s", path)
+        self._prune_checkpoints()
 
         try:
             self.repo.save_checkpoint_meta(
@@ -223,6 +270,26 @@ class Trainer(ABC):
         except Exception:
             logger.exception("チェックポイントのDB記録に失敗しました（ファイルは保存済み）")
         return path
+
+    def _prune_checkpoints(self) -> None:
+        """古いエポックのチェックポイントを削除する（best.pt は対象外）。
+
+        20エポック×2モデルを毎エポック残すと1GB近くになり、ディスクを圧迫する。
+        再開に必要なのは直近のものだけなので、既定では3個だけ残す。
+        """
+        if self.keep_last_checkpoints <= 0:
+            return
+
+        epoch_checkpoints = sorted(
+            self.checkpoint_dir.glob(f"run{self.run_id}_epoch*.pt"),
+            key=lambda p: p.name,
+        )
+        for stale in epoch_checkpoints[: -self.keep_last_checkpoints]:
+            try:
+                stale.unlink()
+                logger.debug("古いチェックポイントを削除しました: %s", stale)
+            except OSError:
+                logger.warning("古いチェックポイントを削除できませんでした: %s", stale)
 
     def load_checkpoint(self, path: str | Path, resume: bool = True) -> dict[str, Any]:
         """チェックポイントを読み込む。`resume=True` なら学習状態も復元する（03_詳細設計書 6節）。"""
