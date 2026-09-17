@@ -8,14 +8,10 @@ Algorithm 1 / 2 の各行に対応する:
     x' ← Truncate(Stack([h_m * x]))   → 30ch（条件付きモデルの入力）
     y' ← Truncate(...)                → 2ch（条件付きモデルの予測対象）
 
-y' のチャンネル数については設計書内に不整合があるため、以下の2モードを設定で切替できる
-（既定は `single_filter`。README「条件付きモデルの予測対象」参照）。
+y' の作り方は論文 Algorithm 1 line 8 に従い、x' と同じく30種すべてを適用する。
 
-    single_filter: 1種類のカーネルのみ y に適用し 2ch を保つ
-                   → 03_詳細設計書 3.3/3.4（μ,s が [K,2,H,W]、y' が [2,H,W]）と整合
-    filter_bank:   30種すべてを y に適用して 60ch にする
-                   → 03_詳細設計書 1.2 の記述どおりだが、混合分布パラメータは
-                     3*K*60 = 1800ch となり案Aの分類器入力（120ch）と両立しない
+    filter_bank（既定・論文準拠）: 30種すべてを y に適用して 60ch にする
+    single_filter:                target_filter の1種類のみ適用し 2ch に保つ（比較用）
 """
 
 from __future__ import annotations
@@ -35,7 +31,7 @@ class DCCTPreprocessor:
         use_cfa_mask: bool = True,
         use_high_pass: bool = True,
         bayer_pattern: str = "RGGB",
-        target_mode: str = "single_filter",
+        target_mode: str = "filter_bank",
         target_filter: str = "square5x5",
         device: torch.device | None = None,
         generator: torch.Generator | None = None,

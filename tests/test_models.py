@@ -20,10 +20,20 @@ from src.preprocess.pipeline import DCCTPreprocessor
 
 
 def test_forward_shapes():
-    net = ConditionalUNet(in_channels=30, target_channels=2, num_mixtures=10)
+    """論文 Algorithm 1 line 10: 混合分布パラメータは画素ごとに1組（per_pixel）。"""
+    net = ConditionalUNet(in_channels=30, target_channels=60, num_mixtures=10)
     params = net(torch.randn(2, 30, 64, 64))
     for tensor in (params.log_w, params.mu, params.log_s):
-        assert tensor.shape == (2, 10, 2, 64, 64)
+        assert tensor.shape == (2, 10, 1, 64, 64)
+
+
+def test_per_channel_scope_gives_params_per_channel():
+    """比較用の per_channel ではチャンネルごとにパラメータを持つこと。"""
+    net = ConditionalUNet(in_channels=30, target_channels=2, num_mixtures=10,
+                          mixture_scope="per_channel")
+    params = net(torch.randn(2, 30, 64, 64))
+    assert params.log_w.shape == (2, 10, 2, 64, 64)
+    assert net.feature_channels == 60
 
 
 def test_mixture_weights_sum_to_one():
@@ -32,13 +42,17 @@ def test_mixture_weights_sum_to_one():
     assert torch.allclose(params.w.sum(dim=1), torch.ones(2, 2, 32, 32), atol=1e-5)
 
 
-def test_feature_map_is_120ch_when_concatenated():
-    """【OI-2】案A: 3*K*2 = 60ch/モデル、pθ・qφ連結で120ch。"""
-    net = ConditionalUNet(num_mixtures=10, target_channels=2, feature_source="mixture_params")
+def test_feature_map_is_60ch_when_concatenated():
+    """【OI-2 確定】論文 Algorithm 1 line 9/32: f_θ(x') = 混合分布パラメータ。
+
+    line 10 がパラメータを画素位置のみで添字付けしているため 3K = 30ch/モデル、
+    pθ・qφ連結で60ch（03_詳細設計書 1.3節の記述とも一致）。
+    """
+    net = ConditionalUNet(num_mixtures=10, target_channels=60, feature_source="mixture_params")
     feature = net.extract_feature(torch.randn(2, 30, 64, 64))
-    assert feature.shape == (2, 60, 64, 64)
-    assert net.feature_channels == 60
-    assert torch.cat([feature, feature], dim=1).shape[1] == 120
+    assert feature.shape == (2, 30, 64, 64)
+    assert net.feature_channels == 30
+    assert torch.cat([feature, feature], dim=1).shape[1] == 60
 
 
 def test_bottleneck_feature_source():
@@ -206,16 +220,17 @@ def test_classifier_can_overfit_two_samples():
 # ------------------------------------------------------ config経由の組み立て
 
 
-def test_builders_wire_config_to_120ch_classifier():
+def test_builders_wire_config_to_paper_shapes():
+    """論文準拠の既定: x'=30ch, y'=60ch, 特徴30ch/モデル, 分類器入力60ch。"""
     config = Config.load(PROJECT_ROOT / "configs" / "stage2_classifier.yaml")
     preprocessor = builders.build_preprocessor(config)
     model = builders.build_conditional_unet(config, preprocessor)
     channels = builders.classifier_input_channels(config, model)
 
-    assert preprocessor.input_channels == 30
-    assert preprocessor.target_channels == 2
-    assert channels == 120
-    assert builders.build_classifier(config, channels).in_channels == 120
+    assert preprocessor.input_channels == 30      # 30フィルタ × 観測1ch
+    assert preprocessor.target_channels == 60     # 30フィルタ × 隠された2ch（Alg.1 line 8）
+    assert channels == 60                         # 3K=30ch × 2モデル
+    assert builders.build_classifier(config, channels).in_channels == 60
 
 
 def test_builders_respect_ablation_a():
@@ -225,23 +240,23 @@ def test_builders_respect_ablation_a():
     config = Config(data)
 
     model = builders.build_conditional_unet(config, builders.build_preprocessor(config))
-    assert builders.classifier_input_channels(config, model) == 60
+    assert builders.classifier_input_channels(config, model) == 30
 
     data["stage2"]["use_photo_model"] = False
     with pytest.raises(ValueError, match="少なくとも一方"):
         builders.classifier_input_channels(Config(data), model)
 
 
-def test_filter_bank_mode_conflicts_with_mixture_params_feature(tmp_path):
-    """target_mode=filter_bank と feature_source=mixture_params は両立しないこと。"""
+def test_filter_bank_with_per_channel_scope_is_rejected(tmp_path):
+    """y'60ch × チャンネルごとのパラメータは分類器入力3600chになるため弾くこと。"""
     import yaml
 
     data = Config.load(PROJECT_ROOT / "configs" / "base.yaml").as_dict()
-    data["model"]["conditional_unet"]["target_mode"] = "filter_bank"
+    data["model"]["conditional_unet"]["mixture_scope"] = "per_channel"
     path = tmp_path / "conflict.yaml"
     path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="bottleneck"):
+    with pytest.raises(ValueError, match="3600ch"):
         Config.load(path)
 
 
@@ -249,21 +264,22 @@ def test_filter_bank_mode_conflicts_with_mixture_params_feature(tmp_path):
 
 
 def test_end_to_end_shapes_from_patch_to_logit():
-    """Algorithm 1 / 2 の一連の流れが形状として通ること。"""
+    """Algorithm 1 / 2 の一連の流れが論文どおりの形状で通ること。"""
     preprocessor = DCCTPreprocessor()
     p_model = ConditionalUNet(preprocessor.input_channels, preprocessor.target_channels).freeze()
     q_model = ConditionalUNet(preprocessor.input_channels, preprocessor.target_channels).freeze()
-    classifier = BinaryClassifier(in_channels=120)
+    classifier = BinaryClassifier(in_channels=60)
 
     patches = torch.rand(3, 3, 64, 64) * 255
     x_prime, y_prime = preprocessor.prepare(patches)
-    assert x_prime.shape == (3, 30, 64, 64) and y_prime.shape == (3, 2, 64, 64)
+    # Algorithm 1 line 8: x' も y' も30種のフィルタをSTACKしたもの
+    assert x_prime.shape == (3, 30, 64, 64) and y_prime.shape == (3, 60, 64, 64)
 
     nll = NLLLoss()(y_prime, ConditionalUNet()(x_prime))
     assert torch.isfinite(nll)
 
     feature = torch.cat([p_model.extract_feature(x_prime), q_model.extract_feature(x_prime)], dim=1)
-    assert feature.shape == (3, 120, 64, 64)
+    assert feature.shape == (3, 60, 64, 64)
     assert classifier(feature).shape == (3,)
 
 
@@ -272,7 +288,7 @@ def test_inference_averages_patch_scores():
     preprocessor = DCCTPreprocessor()
     p_model = ConditionalUNet().freeze()
     q_model = ConditionalUNet().freeze()
-    classifier = BinaryClassifier(in_channels=120)
+    classifier = BinaryClassifier(in_channels=60)
 
     patches = torch.rand(16, 3, 64, 64) * 255
     x_prime = preprocessor.prepare_input(patches)

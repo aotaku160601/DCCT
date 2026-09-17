@@ -251,7 +251,7 @@ def test_stage2_trains_classifier_and_keeps_models_frozen(project):
     )
 
     with TrainerStage2(config) as trainer:
-        assert trainer.classifier.in_channels == 120          # 【OI-2】案A: 60ch × 2モデル
+        assert trainer.classifier.in_channels == 60           # 論文準拠: 3K=30ch × 2モデル
         before_photo = trainer.photo_model.head.weight.clone()
         before_classifier = trainer.classifier.head.weight.clone()
 
@@ -288,7 +288,7 @@ def test_stage2_ablation_a_single_model(project):
 
     with TrainerStage2(config) as trainer:
         assert trainer.photo_model is None
-        assert trainer.classifier.in_channels == 60
+        assert trainer.classifier.in_channels == 30
         trainer.fit(num_epochs=1, max_steps_per_epoch=1)
 
 
@@ -412,13 +412,17 @@ def test_eval_rows_are_shuffled_so_both_labels_appear(project):
                            train={**data["train"], "checkpoint_dir": str(tmp_path / "ckpt_evalrows")})
 
     with TrainerStage2(config) as trainer:
-        rows = trainer.val_loader.dataset.rows
-        labels = [row["label"] for row in rows]
+        # DBの並び順を模した、片方のラベルに固まった行
+        ordered = [{"image_id": i, "label": "ai"} for i in range(50)]
+        ordered += [{"image_id": 50 + i, "label": "real"} for i in range(50)]
 
-        # DBの並び順のままなら先頭は ai に偏る。シャッフル後は先頭の一部にも両方入る
-        head = labels[: max(len(labels) // 2, 2)]
-        assert set(head) == {"ai", "real"}
+        shuffled = trainer.prepare_eval_rows(ordered)
 
+        # 先頭20件（= 先頭数バッチ相当）に両方のラベルが現れる
+        assert set(row["label"] for row in shuffled[:20]) == {"ai", "real"}
+        # 元の並びは ai に偏っていた（修正前の状態）
+        assert set(row["label"] for row in ordered[:20]) == {"ai"}
         # 決定的であること（同じseedなら毎回同じ並び）
-        again = trainer.prepare_eval_rows(sorted(rows, key=lambda r: r["image_id"]))
-        assert [r["image_id"] for r in again] == [r["image_id"] for r in rows]
+        assert [r["image_id"] for r in trainer.prepare_eval_rows(ordered)] == [
+            r["image_id"] for r in shuffled
+        ]

@@ -117,12 +117,23 @@ class Config:
             raise ValueError(
                 f"model.conditional_unet.target_mode は single_filter/filter_bank のいずれか: {target_mode!r}"
             )
-        if target_mode == "filter_bank" and feature_source == "mixture_params":
-            # y' が60chになると混合分布パラメータは 3*K*60 = 1800ch/モデルとなり、
-            # 案A（分類器入力120ch）と両立しない
+        mixture_scope = self.get("model.conditional_unet.mixture_scope", "per_pixel")
+        if mixture_scope not in ("per_pixel", "per_channel"):
             raise ValueError(
-                "target_mode=filter_bank のときは classifier.feature_source=bottleneck にしてください"
-                "（混合分布パラメータが 3*K*60 チャンネルになり案Aの前提と矛盾するため）"
+                f"model.conditional_unet.mixture_scope は per_pixel/per_channel のいずれか: {mixture_scope!r}"
+            )
+        if (
+            target_mode == "filter_bank"
+            and mixture_scope == "per_channel"
+            and feature_source == "mixture_params"
+        ):
+            # y'が60chでチャンネルごとにパラメータを持つと 3*K*60 = 1800ch/モデルとなり、
+            # 分類器の入力が3600chになって現実的でない
+            raise ValueError(
+                "target_mode=filter_bank と mixture_scope=per_channel と "
+                "feature_source=mixture_params の組み合わせは、分類器入力が3600chになるため"
+                "使用できません。mixture_scope=per_pixel（論文準拠）にするか、"
+                "feature_source=bottleneck にしてください"
             )
 
         bayer = self.get("preprocess.bayer_pattern", "RGGB")

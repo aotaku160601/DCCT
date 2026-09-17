@@ -38,7 +38,7 @@ class MixtureParams:
         return self.log_w.shape[1]
 
     def as_feature_map(self) -> torch.Tensor:
-        """分類器入力用に `[B, 3*K*C, H, W]` へ平坦化する（【OI-2】案A）。"""
+        """分類器入力用に `[B, 3*K*Cm, H, W]` へ平坦化する（論文 Algorithm 1 line 32）。"""
         batch, k, c, h, w = self.log_w.shape
         stacked = torch.cat([self.log_w, self.mu, self.log_s], dim=1)  # [B,3K,C,H,W]
         return stacked.reshape(batch, 3 * k * c, h, w)
@@ -61,28 +61,45 @@ class ConditionalUNet(nn.Module):
 
     Args:
         in_channels: 入力チャンネル数（ハイパスフィルタ30種 × 観測1ch = 30）
-        target_channels: 予測対象 y' のチャンネル数（既定2 = 隠された2色）
+        target_channels: 予測対象 y' のチャンネル数（論文 Algorithm 1 line 8 に従うと
+            30フィルタ × 隠された2色 = 60）
         num_mixtures: 混合成分数 K
         base_channels: エンコーダ最初の段のチャンネル数
         feature_source: Stage IIへ渡す特徴（`mixture_params` = 案A / `bottleneck` = 案B）
+        mixture_scope: 混合分布パラメータを画素ごとに1組持つか、チャンネルごとに持つか。
+
+            - `per_pixel`（既定・論文準拠）: 論文 Algorithm 1 line 10 は
+              `Π_(i,j) Σ_k w_k(i,j)·LOGISTIC(y'(i,j)|μ_k(i,j), s_k(i,j))` と、
+              パラメータを画素位置のみで添字付けしている。すなわち混合分布は画素ごとに
+              1つで、y' の全チャンネルがそれを共有する。特徴は 3K = 30ch/モデルとなり、
+              03_詳細設計書 1.3節の「3K=30ch、連結60ch」とも一致する
+            - `per_channel`: チャンネルごとに独立した混合分布を持つ（PixelCNN++の通常の
+              構成）。表現力は高いが、y'が60chだと特徴が 3*K*60 = 1800ch/モデルとなり、
+              分類器の入力が3600chになって現実的でない
     """
 
     def __init__(
         self,
         in_channels: int = 30,
-        target_channels: int = 2,
+        target_channels: int = 60,
         num_mixtures: int = 10,
         base_channels: int = 64,
         feature_source: str = "mixture_params",
+        mixture_scope: str = "per_pixel",
     ) -> None:
         super().__init__()
         if feature_source not in ("mixture_params", "bottleneck"):
             raise ValueError(f"未知の feature_source です: {feature_source!r}")
+        if mixture_scope not in ("per_pixel", "per_channel"):
+            raise ValueError(f"未知の mixture_scope です: {mixture_scope!r}")
 
         self.in_channels = in_channels
         self.target_channels = target_channels
         self.num_mixtures = num_mixtures
         self.feature_source = feature_source
+        self.mixture_scope = mixture_scope
+        # パラメータを持つチャンネル数。per_pixel なら1組を全チャンネルで共有する
+        self.mixture_channels = 1 if mixture_scope == "per_pixel" else target_channels
 
         c1, c2, c3 = base_channels, base_channels * 2, base_channels * 4
 
@@ -96,14 +113,14 @@ class ConditionalUNet(nn.Module):
         self.up1 = nn.ConvTranspose2d(c2, c1, 2, stride=2)
         self.dec1 = _conv_block(c1 * 2, c1)
 
-        # 画素ごとに (log_w, mu, log_s) × K × target_channels
-        self.head = nn.Conv2d(c1, 3 * num_mixtures * target_channels, 1)
+        # 画素ごとに (log_w, mu, log_s) × K × mixture_channels
+        self.head = nn.Conv2d(c1, 3 * num_mixtures * self.mixture_channels, 1)
 
     @property
     def feature_channels(self) -> int:
         """`extract_feature` が返すチャンネル数。"""
         if self.feature_source == "mixture_params":
-            return 3 * self.num_mixtures * self.target_channels
+            return 3 * self.num_mixtures * self.mixture_channels
         return self.dec1[-2].num_channels  # 案B: デコーダ最終ブロックの出力チャンネル数
 
     def _trunk(self, x_prime: torch.Tensor) -> torch.Tensor:
@@ -116,16 +133,22 @@ class ConditionalUNet(nn.Module):
         d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
         return d1
 
-    def forward(self, x_prime: torch.Tensor) -> MixtureParams:
-        """`[B,30,H,W]` → `MixtureParams`（各 `[B,K,C,H,W]`）。"""
-        raw = self.head(self._trunk(x_prime))
+    def _to_params(self, raw: torch.Tensor) -> MixtureParams:
         batch, _, height, width = raw.shape
-        raw = raw.reshape(batch, 3, self.num_mixtures, self.target_channels, height, width)
+        raw = raw.reshape(batch, 3, self.num_mixtures, self.mixture_channels, height, width)
 
         log_w = F.log_softmax(raw[:, 0], dim=1)          # 成分方向に正規化
         mu = raw[:, 1]
         log_s = raw[:, 2].clamp(min=_MIN_LOG_SCALE)
         return MixtureParams(log_w=log_w, mu=mu, log_s=log_s)
+
+    def forward(self, x_prime: torch.Tensor) -> MixtureParams:
+        """`[B,30,H,W]` → `MixtureParams`（各 `[B,K,Cm,H,W]`）。
+
+        `mixture_scope='per_pixel'` では Cm=1 となり、NLL計算時に y' の全チャンネルへ
+        ブロードキャストされる。
+        """
+        return self._to_params(self.head(self._trunk(x_prime)))
 
     def extract_feature(self, x_prime: torch.Tensor) -> torch.Tensor:
         """Stage II の分類器へ渡す特徴マップを返す（1.3節の案A/案B切替）。"""
@@ -133,12 +156,7 @@ class ConditionalUNet(nn.Module):
         if self.feature_source == "bottleneck":
             return trunk
 
-        raw = self.head(trunk)
-        batch, _, height, width = raw.shape
-        raw = raw.reshape(batch, 3, self.num_mixtures, self.target_channels, height, width)
-        log_w = F.log_softmax(raw[:, 0], dim=1)
-        params = MixtureParams(log_w=log_w, mu=raw[:, 1], log_s=raw[:, 2].clamp(min=_MIN_LOG_SCALE))
-        return params.as_feature_map()
+        return self._to_params(self.head(trunk)).as_feature_map()
 
     def freeze(self) -> "ConditionalUNet":
         """Stage II 用にパラメータを固定する（Ablation-D で freeze しない設定も取れる）。"""

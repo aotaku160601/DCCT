@@ -20,6 +20,34 @@ Mermaid図もレンダリングされる）。
 「[設計上の決定事項](#設計上の決定事項open-issues-への回答)」に判断と根拠をまとめている。
 資料側は当時の草稿のまま残してある。
 
+## 論文との対応（準拠性チェック）
+
+参考論文の本文・Algorithm 1 / Algorithm 2・Fig.7 と実装を1項目ずつ突き合わせた結果。
+
+| 論文の記述 | 実装 | 状態 |
+|---|---|---|
+| Alg.1 l.4: Bayer CFAで観測1ch x と隠れ2ch y に分離 | `src/preprocess/cfa_mask.py` `CFAMask`（既定RGGB） | 一致 |
+| Alg.1 l.5-7: `x′ ← TRUNCATE(STACK({h_m * x}), −t, t)` → 30ch | `HighPassFilterBank` + `DCCTPreprocessor` | 一致 |
+| Alg.1 l.8: `y′ ← TRUNCATE(STACK({h_m * y}), −t, t)` → 60ch | `target_mode: filter_bank` | **訂正済み**（旧既定は2ch） |
+| Alg.1 l.9: `f_θ(x′)` = 混合分布パラメータ | `ConditionalUNet.extract_feature` | 一致 |
+| Alg.1 l.10: `Π_(i,j) Σ_k w_k(i,j)·LOGISTIC(y′(i,j)\|μ_k(i,j),s_k(i,j))`（添字は画素のみ） | `mixture_scope: per_pixel` → 3K=30ch/モデル | **訂正済み**（旧既定は3K×2=60ch/モデル） |
+| Alg.1 l.11: NLLで pθ / qφ をそれぞれ独立に学習 | `train-stage1 --model p/q`、Stage IIでは凍結 | 一致 |
+| Alg.1 l.32: `g_ψ(CONCAT(f_θ(x′), f_φ(x′)))` | 分類器入力60ch（30ch×2モデル） | 一致 |
+| Alg.2: P枚のパッチのスコアを平均し τ と比較 | `inference.num_patches: 16`、`score > τ` | 一致 |
+| Fig.7: SRM 30種ハイパスフィルタ | 1次×8 / 2次×4 / 3次×8 / EDGE3x3×4 / SQUARE3x3 / EDGE5x5×4 / SQUARE5x5 | 内訳一致 |
+| K=10、t=7、パッチ64×64、Adam lr=1e-4 | `configs/base.yaml` | 一致 |
+| 分類器: ResNetブロック×4 → Transformer層×2 → FC | `src/model/classifier.py` | 一致 |
+| 学習はSDv1.4のみ、他生成器はcross-generator評価 | `dataset.train_generators: [SDv1.4]` | 一致 |
+
+**訂正済み**の2点は設計資料（03_詳細設計書 §3.3 / §3.4）の記述に従っていた箇所で、
+論文を参照して既定を論文準拠に変更した。これにより過去に学習したチェックポイントは
+**アーキテクチャが変わるため再学習が必要**。
+
+y′ が60chになると損失計算が重くなるが、`mixture_scope: per_pixel` かつ
+`quantize_residual: true` のときは y′ が {−t,…,t} の 2t+1 値しか取らず全チャンネルが同じ
+混合分布を共有するので、`NLLLoss` は 2t+1 通りの対数確率表を1度だけ作って `gather` で引く
+（`use_lookup`）。結果は直接計算と厳密に一致し、CPU実測で1ステップ 2467ms → 757ms（約3.3倍）。
+
 ## はじめての実行手順（macOS）
 
 ### 0. プロジェクトを置く場所
@@ -502,23 +530,30 @@ SRMの残差量子化 `trunc(round(K*I/q), T)` に倣い、q で割った後に�
 クリップするため、残差は {-7, ..., 7} の15値をとる離散量になる
 （`preprocess.quantize_residual: false` で丸めを外せる）。
 
-### 条件付きモデルの予測対象 y'（設計書の記述の食い違い）
+### 条件付きモデルの予測対象 y'（論文で確定）
 
-03_詳細設計書の中で y' のチャンネル数の扱いが分かれている。
+03_詳細設計書の中で y' のチャンネル数の扱いが分かれていた（§1.2 は60ch、§3.3/§3.4 は2ch）。
+参考論文の Algorithm 1 を参照して **60ch（`filter_bank`）が正しい**ことを確認し、既定を変更した。
 
-- §1.2: `y' ← Truncate(Stack([h_m * y for m in 1..M]))` → 30種×2ch = **60ch**
-- §3.3 / §3.4: μ, s は各 `[K,2,H,W]`、`NLLLoss` の入力 y' は `[2,H,W]` → **2ch**
+- Algorithm 1 line 8: `y′ ← TRUNCATE(STACK({h_m * y}_{m=1}^{M}), −t, t)`
+  → 30種のフィルタすべてを y（2ch）に適用してスタックするので **30×2 = 60ch**
+- Algorithm 1 line 10: 混合分布パラメータの添字は**画素位置のみ**
+  → パラメータは 3K = 30ch/モデル（チャンネルごとには持たない）
 
-§1.2 のとおり60chにすると混合分布パラメータは 3×K×60 = 1800ch/モデルとなり、
-すでに確定した案A（分類器入力120ch）と両立しない。OI-2 で §3.3 を採ったのと同じ理由で、
-ここでも §3.3 / §3.4 を優先し **既定は2ch** とする。
+つまり y' は60chだがパラメータは画素ごとに1組であり、§3.3 の `[K,2,H,W]` も
+§1.2 の60chも、それぞれ片方だけを見た記述だった。現在の既定は次のとおり。
 
-| `model.conditional_unet.target_mode` | y' | 備考 |
+| 設定 | 既定値 | 論文の根拠 |
 |---|---|---|
-| `single_filter`（既定） | 2ch | `target_filter`（既定 `square5x5`）1種類のみ y に適用 |
-| `filter_bank` | 60ch | §1.2の記述どおり。`classifier.feature_source: bottleneck` が必須（config検証で強制） |
+| `model.conditional_unet.target_mode` | `filter_bank`（y'=60ch） | Algorithm 1 line 8 |
+| `model.conditional_unet.mixture_scope` | `per_pixel`（3K=30ch/モデル） | Algorithm 1 line 10 |
+| `model.classifier.feature_source` | `mixture_params`（30ch×2モデル=60ch） | 4.3節 |
 
-x'（条件付けの入力）は **どちらのモードでも30種すべてを適用した30ch**である。
+x'（条件付けの入力）は30種すべてを観測1chに適用した **30ch**。
+`target_mode: single_filter`（y'=2ch）と `mixture_scope: per_channel` も設定として残してあるが、
+これらは論文非準拠であり、アブレーション用途にのみ使う。
+`filter_bank` × `per_channel` × `mixture_params` の組み合わせは分類器入力が3600chになるため
+config検証で拒否する。
 
 ### 混合分布の尤度
 
@@ -671,17 +706,11 @@ Midjourneyのレコードだけは `notes` 付きで登録される。後日入�
 
 **案A（U-Net最終出力の混合分布パラメータをそのまま特徴とする）** を採用する。
 
-チャンネル数については設計書内に不整合があるため、以下のとおり解釈を確定した。
+チャンネル数は当初 §3.3 の `[K,2,64,64]` を根拠に120chと解釈していたが、
+参考論文 Algorithm 1 line 10 で混合分布パラメータが**画素位置のみで添字付け**されている
+ことを確認したため、§1.3 の記述どおりに訂正した。
 
-- 03_詳細設計書 §1.3 案A: 「3K = 30ch、2モデル連結で60ch」
-- 03_詳細設計書 §3.3 `forward` 仕様: 「w, μ, s 各 `Tensor[K,2,64,64]`」
-
-y′ は2チャンネル（CFAで隠された残り2色）であり、各チャンネルごとに混合ロジスティック分布の
-パラメータを持つため、§3.3 の定義が論文の定式化と整合する。したがって
-
-> **fθ / fφ の出力特徴は 3 × K × 2 = 60ch（K=10）、pθ・qφ 連結で 120ch**
-
-とする。§1.3 の「30ch/60ch」は μ, s の2ch分を数え落とした記述として扱う。
+> **fθ / fφ の出力特徴は 3K = 30ch（K=10）、pθ・qφ 連結で 60ch**
 
 案B（デコーダ最終層手前のボトルネック特徴）は `configs/base.yaml` の
 `model.classifier.feature_source: mixture_params | bottleneck` で切替可能にしておき、
@@ -693,10 +722,10 @@ y′ は2チャンネル（CFAで隠された残り2色）であり、各チャ�
 |---|---|
 | OI-3 外部SSDマウントパス・ZIP展開先 | `paths.dataset_root` に外出し済み（既定 `/Volumes/Extreme Pro`）。ZIPは展開せず直読みするため展開先は不要（`paths.extract_root` は未使用） |
 | OI-4 / OI-5 GPU・チップ種別・SSDフォーマット | デバイス抽象化で吸収済み。実機がWindowsのため、GPUの有無と `dataset_root` のドライブレターは要確認 |
-| 03-7.2 SRM 30種カーネル係数 | 実装済み（上表の内訳）。論文Fig.7との照合は論文入手時に実施 |
+| 03-7.2 SRM 30種カーネル係数 | 実装済み（上表の内訳）。論文Fig.7と内訳が一致することを照合済み |
 | 03-7.3 判定閾値 τ | 既定0.5。val上でYouden指数最大化によりチューニング |
 | 03-7.4 Transformerのトークン化 | 確定済み（4×4=16トークン、次元256、平均プーリング）|
-| 03-1.2 vs 3.3 y'のチャンネル数 | 2ch（`target_mode: single_filter`）を既定として確定。60chも設定で選べる |
+| 03-1.2 vs 3.3 y'のチャンネル数 | 解決。論文 Algorithm 1 line 8 に従い **60ch（`target_mode: filter_bank`）** を既定に確定 |
 
 ## 実装進捗
 

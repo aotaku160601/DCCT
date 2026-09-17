@@ -196,26 +196,36 @@ def test_jpeg_augmentation_probability():
 # ------------------------------------------------------------ パイプライン
 
 
-def test_pipeline_produces_30ch_input_and_2ch_target():
+def test_pipeline_produces_30ch_input_and_60ch_target():
+    """論文 Algorithm 1 line 8: x' も y' も30種のフィルタをSTACKしたもの。"""
     pre = DCCTPreprocessor(truncation_t=7.0)
     x_prime, y_prime = pre.prepare(torch.rand(4, 3, 64, 64) * 255)
-    assert x_prime.shape == (4, 30, 64, 64)
-    assert y_prime.shape == (4, 2, 64, 64)
-    assert pre.input_channels == 30 and pre.target_channels == 2
+    assert x_prime.shape == (4, 30, 64, 64)      # 30フィルタ × 観測1ch
+    assert y_prime.shape == (4, 60, 64, 64)      # 30フィルタ × 隠された2ch
+    assert pre.input_channels == 30 and pre.target_channels == 60
     assert x_prime.abs().max() <= 7 and y_prime.abs().max() <= 7
 
 
-def test_pipeline_filter_bank_mode():
-    pre = DCCTPreprocessor(target_mode="filter_bank")
+def test_pipeline_single_filter_mode():
+    """比較用モードでは y' が2chに保たれること。"""
+    pre = DCCTPreprocessor(target_mode="single_filter")
     _, y_prime = pre.prepare(torch.rand(2, 3, 64, 64) * 255)
-    assert y_prime.shape == (2, 60, 64, 64)
-    assert pre.target_channels == 60
+    assert y_prime.shape == (2, 2, 64, 64)
+    assert pre.target_channels == 2
 
 
 def test_pipeline_ablation_b_combinations():
-    for use_cfa, use_hp, expected_in in ((True, False, 1), (False, True, 30), (False, False, 1)):
+    """Ablation-B（Table 4b）: ハイパスフィルタ有無 × CFAマスク有無。"""
+    cases = (
+        # (CFAマスク, ハイパス, x'のch, y'のch)
+        (True, False, 1, 2),      # フィルタなし: 素通しなのでch数は増えない
+        (False, True, 30, 60),    # CFAマスクなし: ランダムRGB選択。ch数は既定と同じ
+        (False, False, 1, 2),
+    )
+    for use_cfa, use_hp, expected_in, expected_target in cases:
         pre = DCCTPreprocessor(use_cfa_mask=use_cfa, use_high_pass=use_hp)
         x_prime, y_prime = pre.prepare(torch.rand(2, 3, 64, 64) * 255)
         assert pre.input_channels == expected_in
         assert x_prime.shape[1] == expected_in
-        assert y_prime.shape[1] == 2
+        assert pre.target_channels == expected_target
+        assert y_prime.shape[1] == expected_target

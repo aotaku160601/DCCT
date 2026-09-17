@@ -58,6 +58,7 @@ def build_conditional_unet(config: Config, preprocessor: DCCTPreprocessor) -> Co
         num_mixtures=config.get("model.conditional_unet.num_mixtures", 10),
         base_channels=config.get("model.conditional_unet.base_channels", 64),
         feature_source=config.get("model.classifier.feature_source", "mixture_params"),
+        mixture_scope=config.get("model.conditional_unet.mixture_scope", "per_pixel"),
     )
 
 
@@ -81,9 +82,14 @@ def build_classifier(config: Config, in_channels: int) -> BinaryClassifier:
 
 
 def build_nll_loss(config: Config) -> NLLLoss:
+    # 残差が量子化されていて混合分布が画素ごとなら、値ごとの確率表を引く実装を使う
+    use_lookup = bool(config.get("preprocess.quantize_residual", True)) and (
+        config.get("model.conditional_unet.mixture_scope", "per_pixel") == "per_pixel"
+    )
     return NLLLoss(
         truncation_t=config.get("preprocess.truncation_t", 7),
         reduction=config.get("train.nll_reduction", "mean"),
+        use_lookup=use_lookup,
     )
 
 

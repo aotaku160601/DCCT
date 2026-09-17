@@ -109,19 +109,29 @@ model:
   conditional_unet:
     num_mixtures: 10        # K
     base_channels: 64
-    # 予測対象 y' の作り方（03_詳細設計書の 1.2 と 3.3/3.4 で記述が食い違うため設定化）
-    #   single_filter: 1種類のカーネルのみ y に適用し 2ch を保つ（既定。3.3/3.4と整合）
-    #   filter_bank:   30種すべてを y に適用し 60ch とする（1.2の記述どおり）
-    #                  この場合 classifier.feature_source は bottleneck にする必要がある
-    target_mode: single_filter
+    # 予測対象 y' の作り方。
+    # 論文 Algorithm 1 line 8 が x' と同じく
+    #   y' ← TRUNCATE(STACK({h_m * y}_{m=1..M}), -t, t)
+    # としているため、30種すべてを y に適用した 60ch（filter_bank）が論文準拠。
+    #   filter_bank:   30種すべてを y に適用し 60ch（既定・論文準拠）
+    #   single_filter: target_filter の1種類のみ適用し 2ch に保つ（比較用）
+    target_mode: filter_bank
     target_filter: square5x5
+
+    # 混合分布パラメータを画素ごとに1組持つか、チャンネルごとに持つか。
+    #   per_pixel（既定・論文準拠）: 論文 Algorithm 1 line 10 は
+    #     Π_(i,j) Σ_k w_k(i,j)·LOGISTIC(y'(i,j)|μ_k(i,j), s_k(i,j))
+    #     とパラメータを画素位置のみで添字付けしており、混合分布は画素ごとに1つ。
+    #     特徴は 3K = 30ch/モデル、pθ・qφ連結で60ch（03_詳細設計書 1.3節と一致）
+    #   per_channel: チャンネルごとに独立した混合分布を持つ。y'が60chだと特徴が
+    #     3*K*60 = 1800ch/モデルになり、分類器入力3600chは現実的でない
+    mixture_scope: per_pixel
   classifier:
     resnet_blocks: 4
     transformer_layers: 2
-    # 【OI-2 決定事項】gψへの入力特徴は案A（U-Net最終出力の混合分布パラメータ）を採用。
-    # チャンネル数は 03_詳細設計書 3.3 の定義（w,μ,s 各 [K,2,H,W]）に従い
-    # 3 * K * 2 = 60ch / モデル、pθ・qφ連結で 120ch とする。
-    # （1.3節の「3K=30ch」表記はμ,sの2ch分を数え落としたものとして扱う。README参照）
+    # 【OI-2 確定】論文 Algorithm 1 が line 9 で f_θ(x') を混合分布パラメータと定義し、
+    # line 32 で g_ψ(CONCAT(f_θ(x'), f_φ(x'))) としているため案Aで確定。
+    # mixture_scope=per_pixel と合わせ、3K = 30ch/モデル、連結で60chとなる。
     feature_source: mixture_params   # mixture_params | bottleneck（案B）
 
 train:
