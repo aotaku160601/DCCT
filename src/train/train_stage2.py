@@ -59,7 +59,10 @@ class TrainerStage2(Trainer):
         logger.info("Stage II: train=%d枚 val=%d枚 入力特徴=%dch", len(train_rows), len(val_rows), in_channels)
 
         self.train_loader = self.make_loader(PatchDataset(train_rows, sampler), shuffle=True)
-        self.val_loader = self.make_loader(PatchDataset(val_rows, sampler), shuffle=False)
+        # 先頭Nバッチだけを検証に使うため、ラベルが偏らないよう決定的にシャッフルする
+        self.val_loader = self.make_loader(
+            PatchDataset(self.prepare_eval_rows(val_rows), sampler), shuffle=False
+        )
 
     def _load_conditional_model(self, which: str):
         """Stage I のチェックポイントから pθ / qφ を復元する。"""

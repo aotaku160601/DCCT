@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import shutil
 import time
 from abc import ABC, abstractmethod
@@ -307,6 +308,21 @@ class Trainer(ABC):
             self.best_metric = state.get("best_metric")
             logger.info("エポック %d から再開します: %s", self.start_epoch, path)
         return state
+
+    def prepare_eval_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """検証用の行を決定的にシャッフルして返す。
+
+        `train.max_eval_steps` で先頭Nバッチだけを検証に使うため、DBの並び順
+        （image_id順）のままだと片方のラベルに偏る。ingestは train/ai → train/nature の
+        順に走査するので、val splitの若いIDはすべて ai になり、実機では val_accuracy が
+        「AI画像の再現率」になってしまっていた（実写の誤検出率が測れていなかった）。
+
+        seedで固定したシャッフルなので、エポック間でも実行間でも同じ部分集合になり、
+        チェックポイント選択の指標として比較できる。
+        """
+        shuffled = list(rows)
+        random.Random(int(self.config.get("project.seed", 42))).shuffle(shuffled)
+        return shuffled
 
     def make_loader(self, dataset, shuffle: bool) -> DataLoader:
         num_workers = int(self.config.get("train.num_workers", 0))

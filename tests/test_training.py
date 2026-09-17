@@ -398,3 +398,27 @@ def test_checkpoint_save_failure_does_not_kill_training(project, monkeypatch):
     assert status == "completed"
     # 書きかけの一時ファイルは残さない
     assert not list((tmp_path / "ckpt_savefail").glob("*.tmp"))
+
+
+def test_eval_rows_are_shuffled_so_both_labels_appear(project):
+    """検証の先頭Nバッチが片方のラベルに偏らないこと。
+
+    ingestは train/ai → train/nature の順に走査するため、DBのimage_id順のままだと
+    val splitの先頭はすべて ai になる。max_eval_steps で先頭だけを使うと
+    val_accuracy が「AI画像の再現率」になってしまい、実写の誤検出率が測れない。
+    """
+    tmp_path, data = project
+    config = _write_config(tmp_path, data, "s2_evalrows.yaml",
+                           train={**data["train"], "checkpoint_dir": str(tmp_path / "ckpt_evalrows")})
+
+    with TrainerStage2(config) as trainer:
+        rows = trainer.val_loader.dataset.rows
+        labels = [row["label"] for row in rows]
+
+        # DBの並び順のままなら先頭は ai に偏る。シャッフル後は先頭の一部にも両方入る
+        head = labels[: max(len(labels) // 2, 2)]
+        assert set(head) == {"ai", "real"}
+
+        # 決定的であること（同じseedなら毎回同じ並び）
+        again = trainer.prepare_eval_rows(sorted(rows, key=lambda r: r["image_id"]))
+        assert [r["image_id"] for r in again] == [r["image_id"] for r in rows]

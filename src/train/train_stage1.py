@@ -52,7 +52,10 @@ class TrainerStage1(Trainer):
 
         logger.info("学習対象 %s: train=%d枚 val=%d枚", self.label, len(train_rows), len(val_rows))
         self.train_loader = self.make_loader(PatchDataset(train_rows, sampler), shuffle=True)
-        self.val_loader = self.make_loader(PatchDataset(val_rows, sampler), shuffle=False)
+        # 先頭Nバッチだけを検証に使うため、ラベルが偏らないよう決定的にシャッフルする
+        self.val_loader = self.make_loader(
+            PatchDataset(self.prepare_eval_rows(val_rows), sampler), shuffle=False
+        )
 
     def trainable_modules(self) -> dict[str, torch.nn.Module]:
         return {"conditional_unet": self.model}
