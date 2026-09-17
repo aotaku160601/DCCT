@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 import zipfile
 
 import pytest
@@ -315,3 +316,40 @@ def test_stage2_ablation_d_full_finetuning(project):
 
     saved = torch.load(tmp_path / "ckpt_s2d" / "best.pt", weights_only=False)
     assert {"classifier", "photo_model", "ai_model"} <= set(saved["modules"])
+
+
+def test_db_logging_failure_does_not_kill_training(project, monkeypatch):
+    """指標のDB記録に失敗しても、学習とチェックポイント保存は続くこと。
+
+    pθとqφを並列に流すとSQLiteの書き込みが競合しうる。数時間の学習が
+    記録の失敗で落ちないことを保証する。
+    """
+    tmp_path, data = project
+    config = _write_config(tmp_path, data, "s1_dbfail.yaml",
+                           train={**data["train"], "checkpoint_dir": str(tmp_path / "ckpt_dbfail")})
+
+    with TrainerStage1(config, "photo") as trainer:
+        def boom(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(trainer.repo, "log_training_metric", boom)
+        monkeypatch.setattr(trainer.repo, "save_checkpoint_meta", boom)
+
+        run_id = trainer.fit(num_epochs=1, max_steps_per_epoch=1)
+        status = trainer.repo.conn.execute(
+            "SELECT status FROM training_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()["status"]
+
+    # 学習は完走し、チェックポイントのファイルも残っている
+    assert status == "completed"
+    assert (tmp_path / "ckpt_dbfail" / "best.pt").exists()
+
+
+def test_connection_sets_busy_timeout(tmp_path):
+    """並列実行時にロック待ちで即座に失敗しないこと。"""
+    path = tmp_path / "busy.sqlite3"
+    db_module.init_db(path)
+    conn = db_module.connect(path)
+    timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    conn.close()
+    assert timeout >= 30_000

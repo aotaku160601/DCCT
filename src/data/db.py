@@ -28,15 +28,22 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
+# 書き込みロックが取れないときに待つ時間。pθとqφを並列に学習すると、エポックの
+# 区切りで両プロセスが同時に指標を書き込むため、既定の5秒では衝突しうる
+# （04_DB設計書 7節「同時実行」）。
+_BUSY_TIMEOUT_SECONDS = 60.0
+
+
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """DBへ接続する。外部キー制約を有効化し、行を辞書風に取得できるようにする。"""
     path = resolve(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=_BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # 読み書きの並行性と耐障害性のため WAL を使う（04_DB設計書 7節「同時実行」）
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute(f"PRAGMA busy_timeout = {int(_BUSY_TIMEOUT_SECONDS * 1000)}")
     return conn
 
 

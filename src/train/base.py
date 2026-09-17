@@ -147,20 +147,35 @@ class Trainer(ABC):
                     self.save_checkpoint(epoch, metrics)
                 self._update_best(epoch, metrics)
 
-            self.repo.finish_training_run(self.run_id, "completed")
+            self._finish_run("completed")
         except BaseException:
-            self.repo.finish_training_run(self.run_id, "failed")
+            # 失敗の原因をログファイルにも残す（標準エラーだけだとnohup.outにしか出ない）
+            logger.exception("学習が異常終了しました")
+            self._finish_run("failed")
             raise
         return self.run_id
+
+    def _finish_run(self, status: str) -> None:
+        """実行ステータスを更新する。ここでの失敗は握りつぶす（元の例外を隠さないため）。"""
+        try:
+            self.repo.finish_training_run(self.run_id, status)
+        except Exception:
+            logger.exception("training_runs のステータス更新に失敗しました（status=%s）", status)
 
     def _log_metrics(self, epoch: int, metrics: dict[str, float]) -> None:
         summary = " ".join(f"{k}={v:.4f}" for k, v in metrics.items())
         logger.info("epoch %d | %s", epoch, summary)
-        for name, value in metrics.items():
-            self.repo.log_training_metric(self.run_id, epoch, name, value, step=self.global_step)
-        self.repo.log_training_metric(
-            self.run_id, epoch, "lr", self.optimizer.param_groups[0]["lr"], step=self.global_step
-        )
+
+        # DBへの記録は補助的なもの。ここで失敗しても学習そのものは続ける
+        # （数時間の学習が記録の失敗で落ちるのを防ぐ）。ログには必ず残っている。
+        try:
+            for name, value in metrics.items():
+                self.repo.log_training_metric(self.run_id, epoch, name, value, step=self.global_step)
+            self.repo.log_training_metric(
+                self.run_id, epoch, "lr", self.optimizer.param_groups[0]["lr"], step=self.global_step
+            )
+        except Exception:
+            logger.exception("指標のDB記録に失敗しました（学習は継続します）")
 
     def _update_best(self, epoch: int, metrics: dict[str, float]) -> None:
         value = metrics.get(self.best_metric_name)
@@ -193,16 +208,20 @@ class Trainer(ABC):
     ) -> Path:
         filename = filename or f"run{self.run_id}_epoch{epoch:03d}.pt"
         path = self.checkpoint_dir / filename
+        # まずファイルを確実に残す。DBへの登録が失敗しても学習結果は失われない
         torch.save(self.checkpoint_state(epoch, metrics), path)
-
-        self.repo.save_checkpoint_meta(
-            self.run_id,
-            epoch,
-            str(path),
-            metric_name=self.best_metric_name,
-            metric_value=metrics.get(self.best_metric_name),
-        )
         logger.info("チェックポイントを保存しました: %s", path)
+
+        try:
+            self.repo.save_checkpoint_meta(
+                self.run_id,
+                epoch,
+                str(path),
+                metric_name=self.best_metric_name,
+                metric_value=metrics.get(self.best_metric_name),
+            )
+        except Exception:
+            logger.exception("チェックポイントのDB記録に失敗しました（ファイルは保存済み）")
         return path
 
     def load_checkpoint(self, path: str | Path, resume: bool = True) -> dict[str, Any]:
